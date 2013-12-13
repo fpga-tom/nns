@@ -13,44 +13,52 @@
 
 using namespace std;
 
-#define NODE_COUNT 8
-#define CORTICAL_NUM 16
-#define POPULATION_SIZE 2000
-#define MUTATION_PROB .05
+#define NODE_COUNT 16
+#define CORTICAL_NUM 8
+#define POPULATION_SIZE 400
+#define MUTATION_PROB .15
 #define CROSSOVER_PROB .80
 #define BEST_INDIVIDUALS 2
 #define THREAD_COUNT 4
-#define CORTICAL_IO_NUM 8 
+#define CORTICAL_IN_NUM 5
+#define CORTICAL_OUT_NUM 15
 
 #define NR_INPUTS 5
 #define NR_OUTPUTS 15
-#define SAMPLES 128
+#define SAMPLES 16
 
 
 #define CHAR(x) ((char*)x)
 #define EDGE(incidence, x, y) (incidence[(x*NODE_COUNT+y)/8] & (1<< ((x*NODE_COUNT+y)%8)))
 #define IEDGE(inputs,i,n) (inputs[i][n/8] & (1<<(n%8)))
-#define CORTICAL_INDEX(cortex1,output,cortex2,input) (cortex1*(CORTICAL_IO_NUM*CORTICAL_NUM*CORTICAL_IO_NUM) + output*(CORTICAL_NUM*CORTICAL_IO_NUM)+cortex2*(CORTICAL_IO_NUM) + input)
-#define CORTICAL_INTERCONNECT(cortical_interconnect, cortex1,output,cortex2,input) (cortical_interconnect[CORTICAL_INDEX(cortex1,output,cortex2,input)/8] & (1<<(CORTICAL_INDEX(cortex1,output,cortex2,input)%8)))
+#define CORTICAL_INDEX(cortex1,cortex2) ((cortex1)*(CORTICAL_NUM) + (cortex2))
+#define CORTICAL_INTERCONNECT(cortical_interconnect, cortex1,cortex2) (cortical_interconnect[CORTICAL_INDEX(cortex1,cortex2)/8] & (1<<(CORTICAL_INDEX(cortex1,cortex2)%8)))
 #define ABS(x) ((x) < 0 ? -(x) : (x))
+
+#define CORTICAL(val) ((((val))&0xff)%CORTICAL_NUM)
+#define INPUT(val) ((((val)>>8)&0xff)%CORTICAL_IN_NUM)
+#define OUTPUT(val) ((((val)>>8)&0xff)%CORTICAL_OUT_NUM)
+
+#define WEIGHT_INDEX(x,y) ((x*NODE_COUNT+y)*4)
+#define WEIGHT(weights,x,y) ((((((weights)[WEIGHT_INDEX(x,y)/8])>>(WEIGHT_INDEX(x,y)%8)) & 0x0f) -8)/(7.))
 
 
 
 typedef struct __attribute__ ((__packed__))
 {
-  char incidence[NODE_COUNT * NODE_COUNT / 8]; // bitmap, incidence matrix between neurons
-  short weights[NODE_COUNT][NODE_COUNT]; // weight matrix of connections
+//  char incidence[NODE_COUNT * NODE_COUNT / 8]; // bitmap, incidence matrix between neurons
+  unsigned char weights[NODE_COUNT*NODE_COUNT/2]; // weight matrix of connections, one weight is 4 bits
 //  unsigned char function[NODE_COUNT]; // activation function of neuron
 //    char distance[NODE_COUNT][NODE_COUNT];
-  unsigned char inputs[CORTICAL_IO_NUM];//[NODE_COUNT / 8]; // inputs to network, 1st index is input number, 2nd index is neuron number to witch input belongs
-  short input_weights[CORTICAL_IO_NUM][NODE_COUNT]; // weights of input connections
-  unsigned char outputs[CORTICAL_IO_NUM]; // neuron number of output shared between inner and outer corticals
+//  unsigned char inputs[CORTICAL_IN_NUM];//[NODE_COUNT / 8]; // inputs to network, 1st index is input number, 2nd index is neuron number to witch input belongs
+  unsigned char input_weights[CORTICAL_IN_NUM/2];//[NODE_COUNT]; // weights of input connections
+  unsigned char outputs[CORTICAL_OUT_NUM]; // neuron number of output shared between inner and outer corticals
 } cortical_column_t;
 
 typedef struct __attribute__ ((__packed__)) {
     cortical_column_t cortical[CORTICAL_NUM];
-    char cortical_interconnect[CORTICAL_NUM*CORTICAL_IO_NUM*CORTICAL_NUM*CORTICAL_IO_NUM/8];
-    unsigned short inputs[NR_INPUTS];
+    char cortical_interconnect[CORTICAL_NUM*CORTICAL_NUM/8];
+    unsigned char inputs[NR_INPUTS];
     unsigned short outputs[NR_OUTPUTS];
 } genome_t;
 
@@ -257,12 +265,22 @@ mutate (double prob, genome_t * genome)
 
 void cross(char* ng1, char* g1,char* ng2, char* g2, int s, int size) {
       memcpy (ng1, g1, s / 8);
-      memcpy (CHAR (ng1) + s / 8 + 1, CHAR (g2) + s / 8 + 1, size - s / 8 - 1);
+
+/*
+      cout << (CHAR(ng1)+s/8+1) << endl;
+      cout << (CHAR(g2)+s/8+1) << endl;
+      */
+      assert(size-s/8 >= 0);
+//      cout << (size-s/8-1) << endl;
+
+
+
+      memcpy (CHAR (ng1) + s / 8, CHAR (g2) + s / 8, size - s / 8);
       char mask = (1 << (s % 8)) - 1;
       CHAR (ng1)[s / 8] = (CHAR (g1)[s / 8] & ~mask) | (CHAR (g2)[s / 8] & mask);
 
       memcpy (ng2, g2, s / 8);
-      memcpy (CHAR (ng2) + s / 8 + 1, CHAR (g1) + s / 8 + 1, size - s / 8 - 1);
+      memcpy (CHAR (ng2) + s / 8 , CHAR (g1) + s / 8 , size - s / 8 );
       mask = (1 << (s % 8)) - 1;
       CHAR (ng1)[s / 8] = (CHAR (g2)[s / 8] & ~mask) | (CHAR (g1)[s / 8] & mask);
 }
@@ -271,7 +289,7 @@ void
 crossover (thread_local_t *thread, double prob, population_t * population,
 	   population_t * new_population)
 {
-  int s = rand () % (sizeof (cortical_column_t) * 8);
+//  int s = rand () % (sizeof (cortical_column_t) * 8);
   double r = my_random ();
   double total = 0;
   assert(thread->getPopulationIndex() < POPULATION_SIZE);
@@ -315,10 +333,30 @@ crossover (thread_local_t *thread, double prob, population_t * population,
   if (r < prob)
     {
 
-    for(int k =0;k<CORTICAL_NUM;k++) {
-       s= rand() % (sizeof(genome_t)*8);
+       int s= rand() % (sizeof(genome_t)*8);
 
-       cross((char*)&ng1->genome, (char*)&g1->genome,(char*)&ng2->genome,(char*)&g2->genome,s,sizeof(genome_t));
+       genome_t ngg1,ngg2;
+
+       //cross((char*)&ng1->genome, (char*)&g1->genome,(char*)&ng2->genome,(char*)&g2->genome,s,sizeof(genome_t));
+       cross((char*)&ngg1, (char*)&g1->genome,(char*)&ngg2,(char*)&g2->genome,s,sizeof(genome_t));
+
+       int s1 = (s==0?0:(rand() % s));
+       int new_size=(s+0)/8;
+       assert(new_size < sizeof(genome_t));
+       assert(s1/8 < sizeof(genome_t));
+       assert(sizeof(genome_t)-s1/8 > 0);
+
+       if(new_size>0)
+           cross((char*)&ng1->genome, (char*)&ngg1,(char*)&ng2->genome,(char*)&ngg2,s1,new_size);
+
+       int s2 = rand() % (sizeof(genome_t)*8-s);
+
+       if(sizeof(genome_t)-new_size>0)
+           cross(((char*)&ng1->genome)+new_size, ((char*)&ngg1)+new_size,((char*)&ng2->genome)+new_size,((char*)&ngg2)+new_size,s2,sizeof(genome_t)-new_size);
+       /*
+           */
+/*
+           */
 
         /*
        s= rand() % (sizeof(char)*NODE_COUNT*NODE_COUNT);
@@ -334,7 +372,6 @@ crossover (thread_local_t *thread, double prob, population_t * population,
        s= rand() % (sizeof(char)*NR_OUTPUTS*8);
        cross((char*)&cg1->genome.outputs,(char*) &g1->genome.outputs, (char*)&cg2->genome.outputs, (char*)&g2->genome.outputs,  s, sizeof(char)*NR_OUTPUTS);
        */
-    }
 
 /*
       memcpy (&ng1->genome, &g1->genome, s / 8);
@@ -351,31 +388,32 @@ crossover (thread_local_t *thread, double prob, population_t * population,
     }
   else
     {
-      memcpy (&ng1->genome, &g1->genome, sizeof (cortical_column_t));
-      memcpy (&ng2->genome, &g2->genome, sizeof (cortical_column_t));
+      memcpy (&ng1->genome, &g1->genome, sizeof (genome_t));
+      memcpy (&ng2->genome, &g2->genome, sizeof (genome_t));
     }
 
   mutate (MUTATION_PROB, &ng1->genome);
   mutate (MUTATION_PROB, &ng2->genome);
 }
 
-void calculate_cortical_outputs(genomef_t *individual,int cortical_index, cortical_column_t *cortical, double inputs[CORTICAL_IO_NUM]) {
+void calculate_cortical_outputs(genomef_t *individual,int cortical_index, cortical_column_t *cortical, double inputs[CORTICAL_IN_NUM]) {
 
     for(int i=0;i<NODE_COUNT;i++) {
         double signal = 0;
 
-        for(int k=0;k<CORTICAL_IO_NUM;k++) {
-            if(cortical->inputs[k]%NODE_COUNT==i) {
-              double factor = (cortical->input_weights[k][i] / (double)((32768)-1));
+        for(int k=0;k<CORTICAL_IN_NUM;k++) {
+            //if(cortical->inputs[k]%NODE_COUNT==i) {
+            if(k%NODE_COUNT==i) {
+              double factor = WEIGHT(cortical->input_weights,0, k);//(cortical->input_weights[k] / (double)((128/*32768*/)-1));
               signal+=inputs[k]*factor;
             }
         }
 
         for(int k=0;k<NODE_COUNT;k++) {
-              if (EDGE (cortical->incidence, i, k)) {
-                  double factor = (cortical->weights[i][k] /  (double)((32768)-1));
+//              if (EDGE (cortical->incidence, i, k)) {
+                  double factor = WEIGHT(cortical->weights,i,k);
                   signal += individual->node_outputs[cortical_index][k] * factor;
-              }
+//              }
         }
 
         individual->node_outputs[cortical_index][i]=sigmoid(signal);
@@ -385,33 +423,35 @@ void calculate_cortical_outputs(genomef_t *individual,int cortical_index, cortic
 void _fitness_individual(genomef_t *individual, bool p=false) {
 
 
-    double inputs[CORTICAL_IO_NUM];
+    double inputs[CORTICAL_IN_NUM];
     memset(inputs, 0, sizeof(inputs));
 
     for(int i=0;i<CORTICAL_NUM;i++) {
-        for(int j=0;j<CORTICAL_IO_NUM;j++) {
-            for(int k=0;k<CORTICAL_NUM;k++) {
-                for(int r=0;r<CORTICAL_IO_NUM;r++) {
-                    if(CORTICAL_INTERCONNECT(individual->genome.cortical_interconnect, k,r, i,j)) {
-                        inputs[j]=individual->node_outputs[k][r];
-                    }
+        int j=0;
+        for(int k=0;k<NR_INPUTS;k++) {
+            if(j<CORTICAL_IN_NUM && CORTICAL(individual->genome.inputs[k])==i)
+                 inputs[j++]=individual->input_values[k];
+        }
+
+        for(int k=0;k<CORTICAL_NUM;k++) {
+            if(CORTICAL_INTERCONNECT(individual->genome.cortical_interconnect, k, i)) {
+                for(int r=0;r<CORTICAL_OUT_NUM && j<CORTICAL_IN_NUM ;r++) {
+                    inputs[j++]=individual->node_outputs[k][r];
                 }
             }
-            for(int k=0;k<NR_INPUTS;k++) {
-                if(individual->genome.inputs[k]/CORTICAL_NUM==i && individual->genome.inputs[k]%CORTICAL_NUM==j)
-                     inputs[j]=individual->input_values[k];
-            }
         }
+//        cout << j << endl;
         calculate_cortical_outputs(individual, i, &individual->genome.cortical[i], inputs);
     }
 
 
 
     for(int i=0;i<CORTICAL_NUM;i++) {
-        for(int j=0;j<CORTICAL_IO_NUM;j++) {
+        for(int j=0;j<CORTICAL_OUT_NUM;j++) {
             for(int k=0;k<NR_OUTPUTS;k++) {
-                if(individual->genome.outputs[k]/CORTICAL_IO_NUM==i && individual->genome.outputs[k]%CORTICAL_IO_NUM==j)
+                if(CORTICAL(individual->genome.outputs[k])==i && OUTPUT(individual->genome.outputs[k])==j) {
                      individual->output_values[k]=individual->node_outputs[i][j];
+                }
             }
         }
     }
@@ -463,6 +503,7 @@ fitness_individual (genomef_t * individual, IO_t &io, bool p = false, int count=
   }
   double cumulative_error=0;
 
+      int ham=0;
   for (int q = 0; q < count; q++) {
 
 //        reset_individual(individual);
@@ -473,7 +514,7 @@ fitness_individual (genomef_t * individual, IO_t &io, bool p = false, int count=
       if(p) {
           cout << "input: ";
           for(int i=0;i<NR_INPUTS;i++) {
-              if(individual->input_values[i]>0.5) {
+              if(individual->input_values[i]>0.) {
                   cout << "1" << ",";
               } else {
                   cout << "0" << ",";
@@ -490,16 +531,22 @@ fitness_individual (genomef_t * individual, IO_t &io, bool p = false, int count=
           io.errors[k]=0;
       }
 
+       
+      int ham1=0;
       for(int k=0;k<NR_OUTPUTS;k++) {
 //          int port=g.outputs[k]%NODE_COUNT;
           double output=individual->output_values[k];
           oo[k]=output;
-          int b1=io.outputs[k][q]>.5?1:0;
-          int b2=output>.5?1:0;
-          if(!forecast)
-              io.errors[k]+=(b1^b2)+pow(io.outputs[k][q] - output,2);
+          int b1=io.outputs[k][q]>0.?1:0;
+          int b2=output>0.?1:0;
+              ham1+=b1^b2;
+              ham+=b1^b2;
+          if(!forecast) {
+                  io.errors[k]+=.9*(b1^b2)+.1*pow(io.outputs[k][q] - output,2);//(SAMPLES*NR_OUTPUTS);
+          }
+//              cout << io.errors[k];
       }
-      int hamming_distance=0;
+      double hamming_distance=0;
       for(int k=0;k<NR_OUTPUTS;k++) {
           hamming_distance+=io.errors[k];
       }
@@ -507,12 +554,23 @@ fitness_individual (genomef_t * individual, IO_t &io, bool p = false, int count=
       if (p){
           cout << "fit:   ";
           for(int i=0;i<NR_OUTPUTS;i++) {
-              if(oo[i]>0.50) {
+              cout << "[";
+              if(oo[i]>0.) {
                   cout << "1" <<  ",";
               } else {
                   cout << "0" <<  ",";
               }
+              cout << " " << CORTICAL(individual->genome.outputs[i])  << " ";
+              cout << "]";
           }
+          for(int i=0;i<NR_OUTPUTS;i++) {
+              if(oo[i]>0.) {
+                  cout << oo[i] <<  ",";
+              } else {
+                  cout << oo[i] <<  ",";
+              }
+          }
+          cout << " dist: " << ham1;
           cout << endl;
     	//cout << output << round (output) <<  endl;
       }
@@ -529,8 +587,10 @@ fitness_individual (genomef_t * individual, IO_t &io, bool p = false, int count=
       */
       individual->fitness = 1. / (cumulative_error+0.00001);
   }
-  if (p)
+  if (p) {
     cout << "best individual fitness: " << individual->fitness << endl;
+    cout << "hamming distance: " << ham << endl;
+  }
     
 }
 
@@ -580,7 +640,7 @@ init_random_population (thread_local_t *thread)
   int i=0;
   thread->resetCount();
   while((i=thread->getPopulationIndexInc()) < POPULATION_SIZE) {
-      for (int j = 0; j < sizeof (cortical_column_t); j++) {
+      for (int j = 0; j < sizeof (genome_t); j++) {
     	  ((char *) &population.individual[i].genome)[j] = rand () % 255;
 	}
  }
@@ -605,33 +665,21 @@ void print(IO_t &io,genomef_t *genome) {
 }
 
 void read_io(IO_t &io) {
-#ifndef KENO
-    /*
-  char* in[]={
-      "0,0,0",
-      "0,0,1",
-      "0,1,0",
-      "0,1,1",
-      "1,0,0",
-      "1,0,1",
-      "1,1,0",
-      "1,1,1"};
-  char* out[]={
-      "0,0",
-      "1,0",
-      "0,1",
-      "1,1",
-      "0,0",
-      "0,1",
-      "1,0",
-      "1,1"};
-      */
+#if 0
+  const char* in[]={
+#include "switch_in.dat"
+      };
+  const char* out[]={
+#include "switch_out.dat"
+      };
+#else
       const char* in[]={
-#include "bch_input.dat"
+#include "bch_input.dat.2"
       };
       const char* out[]={
-#include "bch_output.dat"
+#include "bch_output.dat.2"
       };
+#endif
   for(int k=0;k<SAMPLES;k++) {
       sscanf(in[k],"%lf,%lf,%lf,%lf,%lf", 
         &io.inputs[0][k],
@@ -662,7 +710,7 @@ void read_io(IO_t &io) {
         );
    //   cout << io.outputs[0][k] <<"," << io.outputs[1][k] << endl;
   }
-#else
+      /*
   memset(io.inputs,0, sizeof(io.inputs));
   for(int k=0;k<=SAMPLES;k++) {
       for(int l=0;l<20;l++) {
@@ -676,7 +724,7 @@ void read_io(IO_t &io) {
       }
   }
   cout << "sizeof " << sizeof(io.inputs) << "/" << sizeof(double)  << endl;
-#endif
+  */
 
 }
 
@@ -688,9 +736,9 @@ genetic (void *t)
   read_io(io);
   init_random_population (thread);
   fitness (thread, pPopulation,io);
-
-current_sample=SAMPLES;
-//while(current_sample<SAMPLES) {  
+int g=0;
+//current_sample=SAMPLES;
+while(current_sample<SAMPLES) {  
   do
     {
       init_population (thread,pTmpPopulation);
@@ -722,24 +770,25 @@ current_sample=SAMPLES;
       fitness (thread,pPopulation, io);
       find_best_individual(thread, pPopulation);
       pthread_barrier_wait(&barrier);
-      if(thread->thread_id==0)
-          print (io,pPopulation->best_individual);
+      if(thread->thread_id==0) {
+          if(g++%20==0)
+              print (io,pPopulation->best_individual);
+
+      }
       pthread_barrier_wait(&barrier);
 
     }
-  while (pPopulation->best_individual->fitness < .9999);
+  while (pPopulation->best_individual->fitness < 2);
   reset_individual(pPopulation->best_individual);
   fitness_individual(pPopulation->best_individual, io, true);
   cout << pPopulation->best_individual->fitness << endl;
-  /*
   pthread_barrier_wait(&barrier);
   if(thread->thread_id==0) {
       current_sample++;
       cout << "current sample: " << current_sample << endl;
   }
   pthread_barrier_wait(&barrier);
-  */
-//}
+}
   pthread_exit(NULL);
 
 }
@@ -756,11 +805,12 @@ void sighandler(int arg) {
 int
 main ()
 {
-        char cortical_incidence[CORTICAL_NUM*NR_OUTPUTS*CORTICAL_NUM*NR_INPUTS/8];
+        char cortical_incidence[CORTICAL_NUM*CORTICAL_NUM/8];
 
   cout << "cortical size: " <<  sizeof (cortical_column_t) << endl;
   cout << "genome size: " << sizeof (genome_t) << endl;
   cout << "cortical incidence: " << sizeof(cortical_incidence) << endl;
+
 
   init ();
   //signal(SIGINT, sighandler);
