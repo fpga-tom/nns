@@ -17,10 +17,10 @@ using namespace std;
 
 #define DEBUG
 
-#define NEURON_NUM 8
+#define NEURON_NUM 16
 #define CORTEX_NUM 8
-#define POPULATION_SIZE 256
-#define MUTATION_PROB 0.01
+#define POPULATION_SIZE 512
+#define MUTATION_PROB 0.15
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
 
@@ -429,7 +429,7 @@ __global__ void cuError(population_t *p) {
 */
 		__syncthreads();
 		if(threadIdx.x==0) {
-			p->error[g]=error[0];
+			p->error[g]+=error[0];
 //				printf("error: %d %f\n", g, p->error[g]);
 		}
 		__syncthreads();
@@ -560,7 +560,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
       int start_sample=0;
       int stop_sample=1;
-      int stride=1;
+      int stride=SAMPLES;
 
 	  cuInit(population1, population2);
 
