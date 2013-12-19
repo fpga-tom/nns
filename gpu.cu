@@ -17,9 +17,10 @@ using namespace std;
 
 #define DEBUG
 
-#define NEURON_NUM 16
-#define CORTEX_NUM 8
-#define POPULATION_SIZE 512
+#define NEURON_NUM 8
+#define CORTEX_NUM 16
+#define THREAD_PER_NEURON 1
+#define POPULATION_SIZE 256
 #define MUTATION_PROB 0.15
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
@@ -106,6 +107,7 @@ inline void check_cuda_errors(const char *filename, const int line_number)
 }
 
 __device__ inline float sigmoid(float signal) {
+//	return __frsqrt_rn(1+__powf(signal,2));
 	return signal / sqrtf(1+powf(signal, 2));
 }
 
@@ -148,12 +150,10 @@ qs (population_t *population, int array[], int left, int right)
 
 }
 
-__device__ void qsort(population_t *population) {
-    qs(population, population->map, 0, POPULATION_SIZE-1);
+__global__ void qsort(population_t *population) {
+	qs(population,population->map, 0, POPULATION_SIZE-1);
 }
 
-__global__ void sort_by_fitness(population_t *p) {
-}
 
 __global__ void cuReset(population_t *p) {
 	if(THREAD_ID==0) {
@@ -276,9 +276,8 @@ __device__ void _crossover (Counter *c, double prob, population_t * population, 
     {
 
        int s= curand(&population->curandState[THREAD_ID]) % (sizeof(genome_t)*8);
-//printf("%d %d\n", s, THREAD_ID);
 
-       //genome_t ngg1,ngg2;
+//       genome_t ngg1,ngg2;
 
        cross(ng1,g1,ng2,g2,s,sizeof(genome_t));
        /*
@@ -346,26 +345,45 @@ __global__ void cuExcite(population_t* p) {
 
 	while(g < POPULATION_SIZE) {
 		__shared__ float neuron_output[CORTEX_NUM][NEURON_NUM];
+		__shared__ float _signal[CORTEX_NUM][NEURON_NUM][THREAD_PER_NEURON];
+//		__shared__ genome_t _genome;
 		genome_t *genome=genome=&p->genome[g];
 
+/*
+		if(cIdx==0 && nIdx==0 && threadIdx.z==0) {
+			memcpy(&_genome.interconnect,&genome->interconnect, sizeof(_genome.interconnect));
+		}
+
+		if(cIdx==0 && nIdx==1 && threadIdx.z==0) {
+			memcpy(&_genome.input_weight,&genome->input_weight, sizeof(_genome.input_weight));
+		}
+
+		if(nIdx==1 && threadIdx.z==0) {
+			memcpy(&_genome.cortex[cIdx],&genome->cortex[cIdx], sizeof(cortex_t));
+		}
+*/
+			
+
 		neuron_output[cIdx][nIdx]=p->neuron_output[g][cIdx][nIdx];
+		_signal[cIdx][nIdx][threadIdx.z]=0.f;
+
 		__syncthreads();
 
 		float signal=0.;
 		// toto je vypocet jedneho cortexu
-		for(int n=0;n<NEURON_NUM;n++) {
+		for(int n=threadIdx.z;n<NEURON_NUM;n+=blockDim.z) {
 			float factor=WEIGHT(genome->cortex[cIdx].weight, nIdx, n);
-			signal+=factor*neuron_output[cIdx][n];
+			_signal[cIdx][nIdx][threadIdx.z]+=factor*neuron_output[cIdx][n];
 		}
 //		printf("sig1: %d %f", THREAD_ID, signal);
 		__syncthreads();
 		// toto su signaly z ostatnych cortexov
 		for(int n=0;n<CORTEX_NUM;n++) {
-			for(int m=0;m<NEURON_NUM;m++) {
+			for(int m=threadIdx.z;m<NEURON_NUM;m+=blockDim.z) {
 				if(INTERCONNECT_CORTEX(genome->interconnect,n,m)==cIdx)
 					if( INTERCONNECT_NEURON(genome->interconnect,n,m)==nIdx) {
 					float factor=INTERCONNECT_WEIGHT(genome->interconnect,n,m);
-					signal+=factor*neuron_output[n][m];
+					_signal[cIdx][nIdx][threadIdx.z]+=factor*neuron_output[n][m];
 //					printf("%f\n", p->neuron_output[g][n][m]);
 				}
 			}
@@ -373,19 +391,30 @@ __global__ void cuExcite(population_t* p) {
 //		printf("sig2: %d %f", THREAD_ID, signal);
 		__syncthreads();
 		// toto su signaly z zo vstupov
-		for(int n=0;n<NR_INPUTS;n++) {
+		for(int n=threadIdx.z;n<NR_INPUTS;n+=blockDim.z) {
 			float factor=INPUT_WEIGHT(genome->input_weight,n,cIdx,nIdx);
 //			printf("p input: %f %f %d\n", p->input[n],factor, n);
-			signal+=factor*p->input[n];
+			_signal[cIdx][nIdx][threadIdx.z]+=factor*p->input[n];
 		}
 //		printf("sig3: %d %f", THREAD_ID, signal);
+		for(int stride=blockDim.z>>1;stride>0;stride>>=1) {
+			__syncthreads();
+			if(threadIdx.z<stride)
+				_signal[cIdx][nIdx][threadIdx.z]+=_signal[cIdx][nIdx][threadIdx.z+stride];
+		}
+		__syncthreads();
+		if(threadIdx.z==0) {
+			signal=_signal[cIdx][nIdx][0];
+		}
 
 		__syncthreads();
-		neuron_output[cIdx][nIdx]=sigmoid(signal);
+		if(threadIdx.z==0)
+			neuron_output[cIdx][nIdx]=sigmoid(signal);
 //		printf("neuron_output: %d %d %d %f\n", g, cIdx,nIdx,neuron_output[cIdx][nIdx]);
 
 		__syncthreads();	
-		p->neuron_output[g][cIdx][nIdx]=neuron_output[cIdx][nIdx];
+		if(threadIdx.z==0)
+			p->neuron_output[g][cIdx][nIdx]=neuron_output[cIdx][nIdx];
 		__syncthreads();
 		g+=gridDim.x;
 	}
@@ -409,7 +438,7 @@ __global__ void cuError(population_t *p) {
         int b1=p->output[oIdx]>0.?1:0;
         int b2=output>0.?1:0;
 //		printf("e: %d %d %d %d %d %f %f\n",g, cIdx, nIdx, b1, b2, output, p->output[oIdx]); 
-		error[oIdx]=.9*(b1^b2)+.1*powf(p->output[oIdx] - output,2);//(SAMPLES*NR_OUTPUTS);
+		error[oIdx]=/*.9*(b1^b2)+.1*/powf(p->output[oIdx] - output,2);//(SAMPLES*NR_OUTPUTS);
 		
 		for(int stride=16>>1;stride>0;stride>>=1) {
 			__syncthreads();
@@ -443,9 +472,23 @@ __global__ void cuFitness(population_t *p) {
 
 	while(g < POPULATION_SIZE) {
 		p->fitness[g]=1./(p->error[g]+0.00001);
-//		p->map[g]=g;
+		p->map[g]=g;
 		g+=gridDim.x;
 	}
+}
+
+__global__ void cuMaxFitness(population_t *p) {
+	for(int stride=blockDim.x>>1;stride>0;stride>>=1) {
+		__syncthreads();
+		if(threadIdx.x<stride) {
+			if(p->fitness[p->map[threadIdx.x]]<p->fitness[p->map[threadIdx.x+stride]]) {
+				int v=p->map[threadIdx.x];
+				p->map[threadIdx.x]=p->map[threadIdx.x+stride];
+				p->map[threadIdx.x+stride]=v;
+			}
+		}
+	}
+	
 }
 
 /*
@@ -473,7 +516,7 @@ __global__ void init_random_population (population_t* currentPopulation)
 
 __global__ void find_best_individual(population_t* population, float *deviceBestIndividualFitness) {
   if(THREAD_ID==0) {
-    qsort(population);
+//    qsort(population);
     *deviceBestIndividualFitness=population->fitness[population->map[0]];
 /*
 	for(int i=0;i<POPULATION_SIZE;i++) 
@@ -485,6 +528,7 @@ __global__ void find_best_individual(population_t* population, float *deviceBest
 
 __host__ void host_find_best_individual(population_t *p, float *deviceBestIndividualFitness) {
 
+//	qsort<<<1,1>>>(p);
 	find_best_individual<<<1,1>>>(p, deviceBestIndividualFitness);	
 }
 
@@ -509,11 +553,15 @@ void fitness(population_t *population1,IO_t *io, int sample) {
 		check_cuda_errors(__FILE__, __LINE__);
 		cuOutputs<<<1,NR_OUTPUTS>>>(population1, io,sample);
 		check_cuda_errors(__FILE__, __LINE__);
-		cuExcite<<<64,dim3(CORTEX_NUM,NEURON_NUM)>>>(population1);
+		for(int i=0;i<8;i++) {
+			cuExcite<<<POPULATION_SIZE,dim3(CORTEX_NUM,NEURON_NUM,THREAD_PER_NEURON)>>>(population1);
+			check_cuda_errors(__FILE__, __LINE__);
+		}
+		cuError<<<256,NR_OUTPUTS>>>(population1);
 		check_cuda_errors(__FILE__, __LINE__);
-		cuError<<<128,NR_OUTPUTS>>>(population1);
+		cuFitness<<<256,1>>>(population1);
 		check_cuda_errors(__FILE__, __LINE__);
-		cuFitness<<<128,1>>>(population1);
+		cuMaxFitness<<<1,POPULATION_SIZE>>>(population1);
 		check_cuda_errors(__FILE__, __LINE__);
 //		cuTotal<<<1,1>>>(population1);
 //		check_cuda_errors(__FILE__, __LINE__);
@@ -605,7 +653,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 				  fitness(population1, io, i);
 			  }
 
-              if(g%50==0) {
+              if(g%100==0) {
 			  	  printf("generation %d\n", it);
 //				printf("deviceBest\n");
 				  host_find_best_individual(population1,deviceBestIndividualFitness);
@@ -704,8 +752,8 @@ void read_io(IO_t &io) {
 
 int main() {
 
-	printf("sizeof(cortex_t)=%d\n",sizeof(cortex_t));
-	printf("sizeof(genome_t)=%d\n",sizeof(genome_t));
+	printf("sizeof(cortex_t)=%ld\n",sizeof(cortex_t));
+	printf("sizeof(genome_t)=%ld\n",sizeof(genome_t));
 
 	population_t *p1,*p2;
 	IO_t tmp;
