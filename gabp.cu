@@ -17,14 +17,16 @@ using namespace std;
 #define NEURON_NUM 8
 #define CORTEX_NUM 1
 #define THREAD_PER_NEURON 1
-#define POPULATION_SIZE 128
-#define MUTATION_PROB 0.01
+#define POPULATION_SIZE 32
+#define MUTATION_PROB 0.15
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
 
-#define NR_INPUTS 3
-#define NR_OUTPUTS 2
+#define NR_INPUTS 5
+#define NR_OUTPUTS 15
 #define SAMPLES 8
+
+#define BP_NUM 10
 
 #define _THREAD_COUNT (blockDim.x*gridDim.x)
 #define THREAD_ID (blockIdx.x*blockDim.x + threadIdx.x)
@@ -233,18 +235,18 @@ __global__ void VecVecMulErrorDerived(population_t *p) {
 
 	while(g<POPULATION_SIZE) {
 		float Pval=0.f;
-		int nIdx=NEURON_IDX(p->ga_genome[g].output_neuron_idx[ty]);
-		int cIdx=CORTEX_IDX(p->ga_genome[g].output_neuron_idx[ty]);
 
 //		printf("g: %d cor : %d  neur: %d %f\n", g,tz, tx, p->neuron_output_derived[g][tz][tx]);
-		assert(p->neuron_output_derived[g][tz][tx]!=0.f);
-		if(cIdx==tz && nIdx==tx) {
-			float Mdelement=p->neuron_output_derived[g][tz][nIdx];
-			float Vdelement=p->error_t_derived[g][nIdx];
-			Pval=Mdelement*Vdelement;
-			p->delta[g][tz][tx]=Pval;
-//		printf("%d %d %d %f %f %f\n",g, tx, ty, Pval, p->neuron_output_derived[g][tz][tx], p->error_t_derived[g][tx]);
-		}
+			int nIdx=NEURON_IDX(p->ga_genome[g].output_neuron_idx[tx]);
+			int cIdx=CORTEX_IDX(p->ga_genome[g].output_neuron_idx[tx]);
+			assert(p->neuron_output_derived[g][cIdx][nIdx]!=0.f);
+				float Mdelement=p->neuron_output_derived[g][cIdx][nIdx];
+				float Vdelement=p->error_t_derived[g][nIdx];
+				Pval=Mdelement*Vdelement;
+				p->delta[g][cIdx][nIdx]=Pval;
+//		printf("%d %d %d: %f %f %.010f\n",g, cIdx, nIdx, Pval, Mdelement, Vdelement);
+		//		printf("%d %d %d %f %f %f\n",g, tx, ty, Pval, p->neuron_output_derived[g][tz][tx], p->error_t_derived[g][tx]);
+		
 		g+=gridDim.x;
 	}
 }
@@ -260,9 +262,12 @@ __global__ void MatrixVecMulDerived(population_t *p) {
 		float Pval=0.f;
 
 		for(int k=0;k<NEURON_NUM;k++) {
-			float Mdelement=p->bp_genome[g].bp_cortex[tz].weight[k][ty];
-			float Vdelement=p->delta[g][tz][k];
-			Pval+=Mdelement*Vdelement;
+			if(NN_CONNECT(p->ga_genome[g].ga_cortex[tz].connect,ty,k)) {
+				float Mdelement=p->bp_genome[g].bp_cortex[tz].weight[ty][k];//[k][ty]; // transponed
+				float Vdelement=p->delta[g][tz][k];
+				Pval+=Mdelement*Vdelement;
+//		printf("-%d %d %d %d:%f %.010f\n", g, tz, ty, k, Mdelement, Vdelement);
+			}
 		}
 		p->bp_genome[g].bp_cortex[tz].dw[ty]=Pval;
 		g+=gridDim.x;
@@ -282,13 +287,15 @@ __global__ void MatrixMatrixMulDerived(population_t *p) {
 			float Ndelement=p->bp_genome[g].bp_cortex[tz].dw[ty];
 			Pval=Mdelement*Ndelement;
 
+//		printf("+d :%f %f %f %.010f\n",p->neuron_output_derived[g][tz][ty],  Mdelement, Ndelement, Pval);
+
 		p->delta[g][tz][ty]=Pval;
 		g+=gridDim.x;
 	}
 }
 
 __global__ void cuAdjustWeights(population_t *p) {
-	int g=blockDim.x;
+	int g=blockIdx.x;
 
 	int tx=threadIdx.x;
 	int ty=threadIdx.y;
@@ -296,15 +303,17 @@ __global__ void cuAdjustWeights(population_t *p) {
 
 	while(g<POPULATION_SIZE) {
 		if(NN_CONNECT(p->ga_genome[g].ga_cortex[tz].connect, ty, tx )) {
-			float adjust=.1*p->neuron_output[g][tz][tx]*p->delta[g][tz][ty];
+			float adjust=.3*p->neuron_output[g][tz][tx]*p->delta[g][tz][ty];
 			p->bp_genome[g].bp_cortex[tz].weight[tx][ty]-=adjust;
+//			printf("adjust : %f %f %f\n", adjust, p->neuron_output[g][tz][tx], p->delta[g][tz][ty]);
+			
 		}
 		g+=gridDim.x;
 	}
 }
 
 __global__ void cuAdjustWeights(population_t *p, IO_t *io,int sample) {
-	int g=blockDim.x;
+	int g=blockIdx.x;
 
 	int tx=threadIdx.x;
 	int ty=threadIdx.y;
@@ -312,8 +321,9 @@ __global__ void cuAdjustWeights(population_t *p, IO_t *io,int sample) {
 
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_INPUTS;i++) {
-			float adjust=.1*io->inputs[i][sample]*p->delta[g][tz][tx];
+			float adjust=.3*io->inputs[i][sample]*p->delta[g][tz][tx];
 			p->bp_genome[g].input_weight[i][tx][tz]-=adjust;
+//			printf("-adjust : %f %f %f\n", adjust, io->inputs[i][sample], p->delta[g][tz][tx]);
 		}	
 		g+=gridDim.x;
 	}
@@ -364,6 +374,8 @@ __global__ void cuResetError(population_t *p) {
 	int g=blockIdx.x;
 	while(g < POPULATION_SIZE) {
 		p->error[g]=0.f;
+		for(int i=0;i<NEURON_NUM;i++)
+			p->error_t_derived[g][i]=0;
 		g+=gridDim.x;
 	}
 }
@@ -620,7 +632,7 @@ __global__ void cuError(population_t *p) {
 		error[oIdx]=.5*p->error_t_derived[g][nIdx];//(SAMPLES*NR_OUTPUTS);
 		p->error_t[g][oIdx]=error[oIdx];
 		
-		for(int stride=2>>1;stride>0;stride>>=1) {
+		for(int stride=16>>1;stride>0;stride>>=1) {
 			__syncthreads();
 			if(threadIdx.x<stride) {
 				error[threadIdx.x]+=error[threadIdx.x+stride];
@@ -819,7 +831,7 @@ __host__ void excite(population_t *p) {
 }
 
 __host__ void backpropagation(population_t *p) {
-	VecVecMulErrorDerived<<<POPULATION_SIZE, dim3(NEURON_NUM,NR_OUTPUTS)>>>(p);
+	VecVecMulErrorDerived<<<POPULATION_SIZE, dim3(NR_OUTPUTS)>>>(p);
 	check_cuda_errors(__FILE__, __LINE__);
 	for(int i=0;i<4;i++) {
 		MatrixVecMulDerived<<<POPULATION_SIZE, dim3(1, NEURON_NUM,CORTEX_NUM)>>>(p);
@@ -856,7 +868,7 @@ void fitness(population_t *population1,IO_t *io, int sample) {
 }
 
 void train(population_t *population1, IO_t *io, int sample) {
-		for(int j=0; j< 10; j++) {
+		for(int j=0; j< BP_NUM; j++) {
 
 			cuResetNeurons<<<128,1>>>(population1);
 			cuResetError<<<128,1>>>(population1);
@@ -864,10 +876,6 @@ void train(population_t *population1, IO_t *io, int sample) {
 			cuResetDelta<<<POPULATION_SIZE, dim3(CORTEX_NUM,NEURON_NUM)>>>(population1);
 			check_cuda_errors(__FILE__, __LINE__);
 
-		cuInputs<<<1,NR_INPUTS>>>(population1, io,sample);
-		check_cuda_errors(__FILE__, __LINE__);
-		cuOutputs<<<1,NR_OUTPUTS>>>(population1, io,sample);
-		check_cuda_errors(__FILE__, __LINE__);
 
 			excite(population1);
 
@@ -937,6 +945,9 @@ void print_best(population_t *population, IO_t *io, float *deviceBestIndividualF
 	for(int i=start_sample;i<stop_sample;i++) {
         cuResetNeurons<<<128,1>>> (population); 
         check_cuda_errors(__FILE__, __LINE__);
+	cuResetNeurons<<<128,1>>>(population);
+	cuResetError<<<128,1>>>(population);
+//				  train(population, io,i);
 		fitness(population, io, i);
 		host_find_best_individual(population, deviceBestIndividualFitness);
 		print_outputs<<<1,1>>>(population,io, i);
@@ -949,7 +960,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
       int start_sample=0;
       int stop_sample=1;
-      int stride=SAMPLES;
+      int stride=1;
 
 	  cuInit(population1, population2);
 
@@ -987,11 +998,14 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
                   population2 = p;
               }
 
-              cuResetError<<<128,1>>> (population1); 
+//              cuResetError<<<128,1>>> (population1); 
 			  for(int i=start_sample; i<stop_sample;i++) {
               	  cuResetNeurons<<<128,1>>> (population1); 
+                  cuResetError<<<128,1>>> (population1); 
               	  check_cuda_errors(__FILE__, __LINE__);
 				  train(population1, io,i);
+	cuResetNeurons<<<128,1>>>(population1);
+	cuResetError<<<128,1>>>(population1);
 				  fitness(population1, io, i);
 			  }
 
@@ -1001,7 +1015,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
                   check_cuda_errors(__FILE__, __LINE__);
                   cudaMemcpy(hostBestIndividualFitness, deviceBestIndividualFitness, sizeof(float), cudaMemcpyDeviceToHost);
                   check_cuda_errors(__FILE__, __LINE__);
-				  assert(tmpFitness <= *hostBestIndividualFitness);
+//				  assert(tmpFitness <= *hostBestIndividualFitness);
 			  	  tmpFitness=*hostBestIndividualFitness;
 				  print_best(population1, io, deviceBestIndividualFitness, start_sample, stop_sample);
                   check_cuda_errors(__FILE__, __LINE__);
@@ -1011,7 +1025,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 //exit(-1);
             g++;
             it++;
-          } while (*hostBestIndividualFitness < 5);
+          } while (*hostBestIndividualFitness < 1.5);
 	  		*hostBestIndividualFitness=0.;
 
 			tmpFitness=-10000;
@@ -1026,7 +1040,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
 
 void read_io(IO_t &io) {
-#if 1
+#if 0
   const char* in[]={
 #include "switch_in.dat.1"
       };
