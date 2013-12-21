@@ -17,16 +17,16 @@ using namespace std;
 #define NEURON_NUM 8
 #define CORTEX_NUM 1
 #define THREAD_PER_NEURON 1
-#define POPULATION_SIZE 32
+#define POPULATION_SIZE 256
 #define MUTATION_PROB 0.15
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
 
-#define NR_INPUTS 5
-#define NR_OUTPUTS 15
+#define NR_INPUTS 3
+#define NR_OUTPUTS 2
 #define SAMPLES 8
 
-#define BP_NUM 10
+#define BP_NUM 20
 
 #define _THREAD_COUNT (blockDim.x*gridDim.x)
 #define THREAD_ID (blockIdx.x*blockDim.x + threadIdx.x)
@@ -53,6 +53,7 @@ typedef struct {
 
 typedef struct {
 	float weight[NEURON_NUM][NEURON_NUM];
+	float weight_adjust[NEURON_NUM][NEURON_NUM];
 	float dw[NEURON_NUM];
 } bp_cortex_t;
 
@@ -60,6 +61,7 @@ typedef struct {
 	bp_cortex_t bp_cortex[CORTEX_NUM];
 	float weight[CORTEX_NUM][NEURON_NUM][CORTEX_NUM][NEURON_NUM];
 	float input_weight[NR_INPUTS][NEURON_NUM][CORTEX_NUM];
+	float input_weight_adjust[NR_INPUTS][NEURON_NUM][CORTEX_NUM];
 } bp_genome_t;
 
 typedef struct {
@@ -304,10 +306,41 @@ __global__ void cuAdjustWeights(population_t *p) {
 	while(g<POPULATION_SIZE) {
 		if(NN_CONNECT(p->ga_genome[g].ga_cortex[tz].connect, ty, tx )) {
 			float adjust=.3*p->neuron_output[g][tz][tx]*p->delta[g][tz][ty];
-			p->bp_genome[g].bp_cortex[tz].weight[tx][ty]-=adjust;
+			p->bp_genome[g].bp_cortex[tz].weight_adjust[tx][ty]-=adjust;
 //			printf("adjust : %f %f %f\n", adjust, p->neuron_output[g][tz][tx], p->delta[g][tz][ty]);
 			
 		}
+		g+=gridDim.x;
+	}
+}
+
+__global__ void cuResetAdjustWeights(population_t *p) {
+	int g=blockIdx.x;
+
+	int tx=threadIdx.x;
+	int ty=threadIdx.y;
+	int tz=threadIdx.z;
+
+	while(g<POPULATION_SIZE) {
+		for(int i=0;i<NR_INPUTS;i++) {
+			p->bp_genome[g].input_weight_adjust[i][tx][tz]=0.f;
+		}	
+		g+=gridDim.x;
+	}
+}
+
+
+__global__ void cuResetAdjustWeights(population_t *p, IO_t *io, int sample) {
+	int g=blockIdx.x;
+
+	int tx=threadIdx.x;
+	int ty=threadIdx.y;
+	int tz=threadIdx.z;
+
+	while(g<POPULATION_SIZE) {
+		for(int i=0;i<NR_INPUTS;i++) {
+			p->bp_genome[g].input_weight[i][tx][tz]=0.f;
+		}	
 		g+=gridDim.x;
 	}
 }
@@ -322,7 +355,42 @@ __global__ void cuAdjustWeights(population_t *p, IO_t *io,int sample) {
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_INPUTS;i++) {
 			float adjust=.3*io->inputs[i][sample]*p->delta[g][tz][tx];
-			p->bp_genome[g].input_weight[i][tx][tz]-=adjust;
+			p->bp_genome[g].input_weight_adjust[i][tx][tz]-=adjust;
+//			printf("-adjust : %f %f %f\n", adjust, io->inputs[i][sample], p->delta[g][tz][tx]);
+		}	
+		g+=gridDim.x;
+	}
+}
+
+__global__ void cuAdjustWeightsFinal(population_t *p) {
+	int g=blockIdx.x;
+
+	int tx=threadIdx.x;
+	int ty=threadIdx.y;
+	int tz=threadIdx.z;
+
+	while(g<POPULATION_SIZE) {
+		if(NN_CONNECT(p->ga_genome[g].ga_cortex[tz].connect, ty, tx )) {
+			float adjust=p->bp_genome[g].bp_cortex[tz].weight_adjust[tx][ty];
+			p->bp_genome[g].bp_cortex[tz].weight[tx][ty]+=adjust;
+//			printf("adjust : %f %f %f\n", adjust, p->neuron_output[g][tz][tx], p->delta[g][tz][ty]);
+			
+		}
+		g+=gridDim.x;
+	}
+}
+
+__global__ void cuAdjustWeightsFinal(population_t *p, IO_t *io,int sample) {
+	int g=blockIdx.x;
+
+	int tx=threadIdx.x;
+	int ty=threadIdx.y;
+	int tz=threadIdx.z;
+
+	while(g<POPULATION_SIZE) {
+		for(int i=0;i<NR_INPUTS;i++) {
+			float adjust=p->bp_genome[g].input_weight_adjust[i][tx][tz];
+			p->bp_genome[g].input_weight[i][tx][tz]+=adjust;
 //			printf("-adjust : %f %f %f\n", adjust, io->inputs[i][sample], p->delta[g][tz][tx]);
 		}	
 		g+=gridDim.x;
@@ -628,11 +696,12 @@ __global__ void cuError(population_t *p) {
 //        int b1=p->output[oIdx]>0.?1:0;
 //        int b2=output>0.?1:0;
 //		printf("e: %d %d %d %d %d %f %f\n",g, cIdx, nIdx, b1, b2, output, p->output[oIdx]); 
-		p->error_t_derived[g][nIdx]=powf(p->output[oIdx] - output,2);
-		error[oIdx]=.5*p->error_t_derived[g][nIdx];//(SAMPLES*NR_OUTPUTS);
+		float ed=powf(p->output[oIdx] - output,2);
+		p->error_t_derived[g][nIdx]=ed;
+		error[oIdx]=.5*ed;//(SAMPLES*NR_OUTPUTS);
 		p->error_t[g][oIdx]=error[oIdx];
 		
-		for(int stride=16>>1;stride>0;stride>>=1) {
+		for(int stride=2>>1;stride>0;stride>>=1) {
 			__syncthreads();
 			if(threadIdx.x<stride) {
 				error[threadIdx.x]+=error[threadIdx.x+stride];
@@ -867,50 +936,43 @@ void fitness(population_t *population1,IO_t *io, int sample) {
 //		check_cuda_errors(__FILE__, __LINE__);
 }
 
-void train(population_t *population1, IO_t *io, int sample) {
+void train(population_t *population1, IO_t *io, int start_sample, int stop_sample) {
 		for(int j=0; j< BP_NUM; j++) {
-
-			cuResetNeurons<<<128,1>>>(population1);
-			cuResetError<<<128,1>>>(population1);
-
 			cuResetDelta<<<POPULATION_SIZE, dim3(CORTEX_NUM,NEURON_NUM)>>>(population1);
 			check_cuda_errors(__FILE__, __LINE__);
-
-
-			excite(population1);
-
-			cuError<<<256,NR_OUTPUTS>>>(population1);
+			cuResetError<<<128,1>>>(population1);
+			check_cuda_errors(__FILE__, __LINE__);
+			cuResetAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,NEURON_NUM,CORTEX_NUM)>>>(population1);
+			check_cuda_errors(__FILE__, __LINE__);
+			cuResetAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,1,CORTEX_NUM)>>>(population1,io,0);
 			check_cuda_errors(__FILE__, __LINE__);
 
-			backpropagation(population1);
+			for(int sample=start_sample; sample<stop_sample;sample++) {
 
-			cuAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,NEURON_NUM,CORTEX_NUM)>>>(population1);
-			check_cuda_errors(__FILE__, __LINE__);
+					cuResetNeurons<<<128,1>>>(population1);
+					cuResetError<<<128,1>>>(population1);
 
-			cuAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,1,CORTEX_NUM)>>>(population1, io,sample);
-			check_cuda_errors(__FILE__, __LINE__);
-/*
-			for(int i=0;i<4;i++) {
-				cuExcite<<<POPULATION_SIZE,dim3(CORTEX_NUM,NEURON_NUM,THREAD_PER_NEURON)>>>(population1);
-				check_cuda_errors(__FILE__, __LINE__);
+
+
+					excite(population1);
+
+					cuError<<<256,NR_OUTPUTS>>>(population1);
+					check_cuda_errors(__FILE__, __LINE__);
+
+					backpropagation(population1);
+
+					cuAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,NEURON_NUM,CORTEX_NUM)>>>(population1);
+					check_cuda_errors(__FILE__, __LINE__);
+
+					cuAdjustWeights<<<POPULATION_SIZE, dim3(NEURON_NUM,1,CORTEX_NUM)>>>(population1, io,sample);
+					check_cuda_errors(__FILE__, __LINE__);
 			}
-*/
-
-
-
-
-/*
-			cuBackpropagationError<<<POPULATION_SIZE,1>>>(population1);
+			cuAdjustWeightsFinal<<<POPULATION_SIZE, dim3(NEURON_NUM,NEURON_NUM,CORTEX_NUM)>>>(population1);
 			check_cuda_errors(__FILE__, __LINE__);
 
-			for(int i=0;i<4;i++) {
-				cuBackpropagationInner<<<POPULATION_SIZE,CORTEX_NUM>>>(population1);
-				check_cuda_errors(__FILE__, __LINE__);
-			}
-			cuAdjustWeights<<<POPULATION_SIZE, CORTEX_NUM>>>(population1, io, sample);
+			cuAdjustWeightsFinal<<<POPULATION_SIZE, dim3(NEURON_NUM,1,CORTEX_NUM)>>>(population1, io,0);
 			check_cuda_errors(__FILE__, __LINE__);
-*/
-		}
+	}
 }
 
 __global__ void print_outputs(population_t *p, IO_t *io,int sample) {
@@ -960,7 +1022,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
       int start_sample=0;
       int stop_sample=1;
-      int stride=1;
+      int stride=SAMPLES;
 
 	  cuInit(population1, population2);
 
@@ -999,13 +1061,15 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
               }
 
 //              cuResetError<<<128,1>>> (population1); 
+				  train(population1, io,start_sample, stop_sample);
 			  for(int i=start_sample; i<stop_sample;i++) {
               	  cuResetNeurons<<<128,1>>> (population1); 
+/*
                   cuResetError<<<128,1>>> (population1); 
               	  check_cuda_errors(__FILE__, __LINE__);
-				  train(population1, io,i);
 	cuResetNeurons<<<128,1>>>(population1);
 	cuResetError<<<128,1>>>(population1);
+*/
 				  fitness(population1, io, i);
 			  }
 
@@ -1015,7 +1079,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
                   check_cuda_errors(__FILE__, __LINE__);
                   cudaMemcpy(hostBestIndividualFitness, deviceBestIndividualFitness, sizeof(float), cudaMemcpyDeviceToHost);
                   check_cuda_errors(__FILE__, __LINE__);
-//				  assert(tmpFitness <= *hostBestIndividualFitness);
+				  assert(tmpFitness <= *hostBestIndividualFitness);
 			  	  tmpFitness=*hostBestIndividualFitness;
 				  print_best(population1, io, deviceBestIndividualFitness, start_sample, stop_sample);
                   check_cuda_errors(__FILE__, __LINE__);
@@ -1025,7 +1089,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 //exit(-1);
             g++;
             it++;
-          } while (*hostBestIndividualFitness < 1.5);
+          } while (*hostBestIndividualFitness < 1000000);
 	  		*hostBestIndividualFitness=0.;
 
 			tmpFitness=-10000;
@@ -1040,7 +1104,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
 
 void read_io(IO_t &io) {
-#if 0
+#if 1
   const char* in[]={
 #include "switch_in.dat.1"
       };
