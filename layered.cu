@@ -15,20 +15,20 @@
 
 using namespace std;
 
-#define NEURON_NUM 8
+#define NEURON_NUM 16
 #define HIDDEN_LAYER_NUM 2
-#define POPULATION_SIZE 64
+#define POPULATION_SIZE 256
 #define MUTATION_PROB 0.01
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
 
-#define LEARNING_RATE 0.1
+#define LEARNING_RATE 0.2
 
 #define NR_INPUTS 5
 #define NR_OUTPUTS 15
 #define SAMPLES 16
 
-#define BP_NUM 50
+#define BP_NUM 400
 
 #define _THREAD_COUNT (blockDim.x*gridDim.x)
 #define THREAD_ID (blockIdx.x*blockDim.x + threadIdx.x)
@@ -139,12 +139,14 @@ float *hostBestIndividualFitness;
 // ------------------------------------------------------------------------------------------------
 inline void check_cuda_errors(const char *filename, const int line_number)
 {
+/*
       cudaDeviceSynchronize();
       cudaError_t error = cudaGetLastError();
       if(error != cudaSuccess) {
           printf("CUDA error at %s:%i: %s\n", filename, line_number, cudaGetErrorString(error));
           exit(-1);
       }
+*/
 }
 
 __device__ inline float sigmoid(float signal) {
@@ -992,7 +994,7 @@ __global__ void init_random_population (population_t* currentPopulation)
 
 __global__ void find_best_individual(population_t* population, float *deviceBestIndividualFitness) {
   if(THREAD_ID==0) {
-	qsort(population);
+//	qsort(population);
     *deviceBestIndividualFitness=population->fitness[population->map[0]];
 /*
 	for(int i=0;i<POPULATION_SIZE;i++) 
@@ -1101,13 +1103,11 @@ void fitness(population_t *population1,IO_t *io, int sample) {
 
 void train(population_t *p, IO_t *io, int start_sample, int stop_sample) {
 	for(int j=0;j<BP_NUM;j++) {
-		hoResetWeightAdjust(p);
-		check_cuda_errors(__FILE__,__LINE__);
 		for(int sample=start_sample;sample<stop_sample; sample++) {
+		hoResetWeightAdjust(p);
+//		check_cuda_errors(__FILE__,__LINE__);
 			hoResetDelta(p);
-			check_cuda_errors(__FILE__,__LINE__);
 			hoResetOutput(p);
-			check_cuda_errors(__FILE__,__LINE__);
 			hoResetInput(p);
 			check_cuda_errors(__FILE__,__LINE__);
 
@@ -1119,8 +1119,8 @@ void train(population_t *p, IO_t *io, int start_sample, int stop_sample) {
 			check_cuda_errors(__FILE__,__LINE__);
 			hoAddAdjustWeights(p, io, sample);
 			check_cuda_errors(__FILE__,__LINE__);
+			hoAdjustWeights(p);
 		}
-		hoAdjustWeights(p);
 	}
 }
 
@@ -1182,7 +1182,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 
       int start_sample=0;
       int stop_sample=1;
-      int stride=1;
+      int stride=SAMPLES;
 
 	  cuInit(population1, population2);
 
@@ -1206,8 +1206,11 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 //			hoReset(population1);
 			  hoResetExceptWeights(population1);
 			  train(population1, io,start_sample, stop_sample);
+		hoResetMse(population1);
 			  for(int i=start_sample; i<stop_sample;i++) {
-				  resetFitness(population1);
+		hoResetInput(population1);
+		hoResetOutput(population1);
+//				  resetFitness(population1);
 				  fitness(population1, io, i);
 			  }
 /*
