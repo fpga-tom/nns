@@ -16,27 +16,27 @@
 using namespace std;
 
 #define NEURON_NUM 8
-#define HIDDEN_LAYER_NUM 4
+#define HIDDEN_LAYER_NUM 2
 #define POPULATION_SIZE 64
-#define MUTATION_PROB 0.015
+#define MUTATION_PROB 0.01
 #define CROSSOVER_PROB 0.8
 #define BEST_INDIVIDUALS 2
 
-#define NR_INPUTS 3
-#define NR_OUTPUTS 2
-#define SAMPLES 8
+#define LEARNING_RATE 0.1
 
-#define BP_NUM 20
+#define NR_INPUTS 5
+#define NR_OUTPUTS 15
+#define SAMPLES 16
+
+#define BP_NUM 50
 
 #define _THREAD_COUNT (blockDim.x*gridDim.x)
 #define THREAD_ID (blockIdx.x*blockDim.x + threadIdx.x)
 #define CHAR(x) ((char*)x)
 
-#define INTERCONNECT_VALUE(i,c,n) (i[c][n])
-#define INTERCONNECT_CORTEX(i,c,n) (INTERCONNECT_VALUE(i,c,n)&0xf)
-#define INTERCONNECT_NEURON(i,c,n) ((INTERCONNECT_VALUE(i,c,n)>>4)&0x7)
 #define NN_CONNECT(connect,x,y) (connect[(y*NEURON_NUM+x)/8]&(1<<((y*NEURON_NUM+x)%8)))
-#define CC_CONNECT(connect,x,y) ((INTERCONNECT_VALUE(connect,x,y)>>4)&0x8)
+#define NN_CONNECT_INPUT(connect, iIdx, nIdx) (connect[(iIdx*NEURON_NUM+nIdx)/8]&(1<<((iIdx*NEURON_NUM+nIdx)%8)))
+#define NN_CONNECT_OUTPUT(connect, oIdx, nIdx) (connect[(oIdx*NEURON_NUM+nIdx)/8]&(1<<((oIdx*NEURON_NUM+nIdx)%8)))
 
 #define NEURON_IDX(output_neuron_idx) ((output_neuron_idx&0xf)%NEURON_NUM)
 #define CORTEX_IDX(output_neuron_idx) (((output_neuron_idx>>4)&0xf)%CORTEX_NUM)
@@ -296,6 +296,7 @@ __global__ void cuResetNeuronOutputInputLayer(population_t *p) {
 	int inputIdx=threadIdx.x%NR_INPUTS;
 	while(g<POPULATION_SIZE) {
 		p->input_layer_neuron_output[g][inputIdx]=0.f;
+		p->input_layer_neuron_output_derived[g][inputIdx]=0.f;
 		g+=gridDim.x;
 	}
 }
@@ -321,6 +322,7 @@ __global__ void cuResetNeuronOutputOutputLayer(population_t *p) {
 
 	while(g<POPULATION_SIZE) {
 		p->output_layer_neuron_output[g][outputIdx]=0.f;
+		p->output_layer_neuron_output_derived[g][outputIdx]=0.f;
 		g+=gridDim.x;
 	}
 }
@@ -452,8 +454,8 @@ __host__ void hoResetMse(population_t *p) {
 	cuResetMse<<<POPULATION_SIZE,1>>>(p);
 }
 
-__host__ void hoReset(population_t *p) {
-	hoResetWeights(p);
+
+__host__ void hoResetExceptWeights(population_t *p) {
 	check_cuda_errors(__FILE__,__LINE__);
 	hoResetInput(p);
 	check_cuda_errors(__FILE__,__LINE__);
@@ -465,6 +467,10 @@ __host__ void hoReset(population_t *p) {
 	check_cuda_errors(__FILE__,__LINE__);
 	hoResetMse(p);
 	check_cuda_errors(__FILE__,__LINE__);
+}
+__host__ void hoReset(population_t *p) {
+	hoResetExceptWeights(p);
+	hoResetWeights(p);
 }
 
 //---------------------------------------------------------------------------------------
@@ -501,8 +507,9 @@ __global__ void cuInputsHiddenLayer(population_t *p) {
 
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_INPUTS;i++) 
-			if(NN_CONNECT(p->ga_genome[g].ga_input.connect, neuronIdx,i)) {
-				p->hidden_layer_neuron_input[g][0][neuronIdx]+=p->input_layer_neuron_output[g][i];
+			if(NN_CONNECT_INPUT(p->ga_genome[g].ga_input.connect, /*neuronIdx,i*/ i, neuronIdx)) {
+				p->hidden_layer_neuron_input[g][0][neuronIdx]+=p->input_layer_neuron_output[g][i]*
+/*!!!!!!!!!!!!!*/			p->bp_genome[g].bp_hidden[0].weight[neuronIdx][i];
 				assert(p->hidden_layer_neuron_input[g][0][neuronIdx]==p->hidden_layer_neuron_input[g][0][neuronIdx]);
 			}
 		g+=gridDim.x;
@@ -548,7 +555,7 @@ __global__ void cuInputsOutputLayer(population_t *p) {
 	int neuronIdx=threadIdx.x%NR_OUTPUTS;
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NEURON_NUM;i++) {
-			if(NN_CONNECT(p->ga_genome[g].ga_output.connect, neuronIdx,i)) {
+			if(NN_CONNECT_OUTPUT(p->ga_genome[g].ga_output.connect, neuronIdx,i)) {
 				p->output_layer_neuron_input[g][neuronIdx]+=p->hidden_layer_neuron_output[g][HIDDEN_LAYER_NUM-1][i]*p->bp_genome[g].bp_output.weight[neuronIdx][i];
 				assert(p->output_layer_neuron_input[g][neuronIdx]==p->output_layer_neuron_input[g][neuronIdx]);
 			}
@@ -604,7 +611,7 @@ __global__ void cuDeltaOutputLayer(population_t *p) {
 		p->delta_output_layer[g][neuronIdx]=p->output_layer_neuron_output_derived[g][neuronIdx]*
 			p->error_derived[g][neuronIdx];
 #ifdef DEBUG
-		printf("error_derived: %d %f\n", g, p->error_derived[g][neuronIdx]);
+		printf("p->delta_output_layer[%d][%d]=%f error_derived[%d][%d]=%f p->output_layer_neuron_output_derived[%d][%d]=%f\n", g,neuronIdx, p->delta_output_layer[g][neuronIdx], g, neuronIdx, p->error_derived[g][neuronIdx], g, neuronIdx, p->output_layer_neuron_output_derived[g][neuronIdx]);
 #endif
 		assert(p->delta_output_layer[g][neuronIdx]==p->delta_output_layer[g][neuronIdx]);
 		g+=gridDim.x;
@@ -619,11 +626,11 @@ __global__ void cuDeltaHiddenLayerFromOutputLayer(population_t *p) {
 	int neuronIdx=threadIdx.x%NEURON_NUM;
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_OUTPUTS;i++) 
-			if(NN_CONNECT(p->ga_genome[g].ga_output.connect, i, neuronIdx))  {
+			if(NN_CONNECT_OUTPUT(p->ga_genome[g].ga_output.connect, i, neuronIdx))  {
 				p->delta_hidden_layer[g][HIDDEN_LAYER_NUM-1][neuronIdx]+=p->delta_output_layer[g][i]
 						*p->bp_genome[g].bp_output.weight[i][neuronIdx];
 #ifdef DEBUG
-				printf("delta_output_layer %f output_weight %f\n", p->delta_output_layer[g][i], p->bp_genome[g].bp_output.weight[i][neuronIdx]);
+				printf("delta_output_layer[%d][%i]=%f output_weight[%d][%d]=%f p->delta_hidden_layer[%d][%d][%d]=%f\n", g,i,p->delta_output_layer[g][i], i, neuronIdx, p->bp_genome[g].bp_output.weight[i][neuronIdx], g, HIDDEN_LAYER_NUM-1, neuronIdx, p->delta_hidden_layer[g][HIDDEN_LAYER_NUM-1][neuronIdx]);
 #endif
 				assert(p->delta_hidden_layer[g][HIDDEN_LAYER_NUM-1][neuronIdx]==p->delta_hidden_layer[g][HIDDEN_LAYER_NUM-1][neuronIdx]);
 			}
@@ -651,15 +658,30 @@ __global__ void cuDeltaHiddenLayer(population_t *p, int layerIdx) {
 	}
 }
 
+//<<<POPULATION_SIZE, NEURON_NUM>>>
+__global__ void cuMulDerivedHiddenLayer(population_t *p, int layerIdx) {
+	int g=blockIdx.x;
+
+	int neuronIdx=threadIdx.x%NEURON_NUM;
+	
+	while(g<POPULATION_SIZE) {
+		p->delta_hidden_layer[g][layerIdx][neuronIdx]*=p->hidden_layer_neuron_output_derived[g][layerIdx][neuronIdx];
+#ifdef DEBUG
+		printf("p->hidden_layer_neuron_output_derived[%d][%d][%d]=%f  p->delta_hidden_layer[%d][%d][%d]=%f\n",g, layerIdx, neuronIdx, p->hidden_layer_neuron_output_derived[g][layerIdx][neuronIdx],  g, layerIdx, neuronIdx, p->delta_hidden_layer[g][layerIdx][neuronIdx]);
+#endif
+		g+=gridDim.x;
+	}
+}
+
 
 //<<<POPULATION_SIZE, NR_INPUTS>>>
 __global__ void cuDeltaInputLayerFromHiddenLayer(population_t *p) {
 	int g=blockIdx.x;
 
-	int inputIdx=threadIdx.x;
+	int inputIdx=threadIdx.x%NR_INPUTS;
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NEURON_NUM;i++) {
-			if(NN_CONNECT(p->ga_genome[g].ga_hidden[0].connect, i, inputIdx))  {
+			if(NN_CONNECT_INPUT(p->ga_genome[g].ga_input.connect, /*i, inputIdx*/ inputIdx, i))  {
 				p->delta_input_layer[g][inputIdx]+=p->delta_hidden_layer[g][0][i]*p->bp_genome[g].bp_hidden[0].weight[i][inputIdx];
 //				printf("%f %f\n", p->delta_hidden_layer[g][0][i], p->bp_genome[g].bp_hidden[0].weight[i][inputIdx]);
 				assert(p->bp_genome[g].bp_hidden[0].weight[i][inputIdx]==p->bp_genome[g].bp_hidden[0].weight[i][inputIdx]);
@@ -671,13 +693,29 @@ __global__ void cuDeltaInputLayerFromHiddenLayer(population_t *p) {
 	}
 }
 
+//<<<POPULATION_SIZE, NR_INPUTS>>>
+__global__ void cuMulDerivedInputLayer(population_t *p) {
+	int g=blockIdx.x;
+	
+	int inputIdx=threadIdx.x%NR_INPUTS;
+
+	while(g<POPULATION_SIZE) {
+		p->delta_input_layer[g][inputIdx]*=p->input_layer_neuron_output_derived[g][inputIdx];
+		g+=gridDim.x;
+	}
+}
+
 __host__ void hoBackpropagation(population_t *p) {
 	cuDeltaOutputLayer<<<POPULATION_SIZE, NR_OUTPUTS>>>(p);
 	cuDeltaHiddenLayerFromOutputLayer<<<POPULATION_SIZE, NEURON_NUM>>>(p);
+	cuMulDerivedHiddenLayer<<<POPULATION_SIZE, NEURON_NUM>>>(p, HIDDEN_LAYER_NUM-1);
+
 	for(int i=HIDDEN_LAYER_NUM-1;i>0;i--) {
 		cuDeltaHiddenLayer<<<POPULATION_SIZE, NEURON_NUM>>>(p, i);
+		cuMulDerivedHiddenLayer<<<POPULATION_SIZE, NEURON_NUM>>>(p, i-1);
 	}
 	cuDeltaInputLayerFromHiddenLayer<<<POPULATION_SIZE, NR_INPUTS>>>(p);
+	cuMulDerivedInputLayer<<<POPULATION_SIZE, NR_INPUTS>>>(p);
 }
 
 // ----------------------------------------------------------------------------------
@@ -692,6 +730,9 @@ __global__ void cuAddAdjustInputLayer(population_t *p, IO_t *io, int sample) {
 	while(g<POPULATION_SIZE) {
 		p->bp_genome[g].bp_input.weight_adjust[inputIdx]+=p->delta_input_layer[g][inputIdx]*
 			io->inputs[inputIdx][sample];
+#ifdef DEBUG
+		printf("p->delta_input_layer[%d][%d]=%f\n", g, inputIdx, p->delta_input_layer[g][inputIdx]);
+#endif
 		g+=gridDim.x;
 	}
 }
@@ -703,7 +744,7 @@ __global__ void cuAddAdjustHiddenLayerFromInputLayer(population_t *p) {
 	int inputIdx=threadIdx.y%NR_INPUTS;
 
 	while(g<POPULATION_SIZE) {
-		if(NN_CONNECT(p->ga_genome[g].ga_input.connect, neuronIdx, inputIdx)) 
+		if(NN_CONNECT_INPUT(p->ga_genome[g].ga_input.connect, /*neuronIdx, inputIdx*/ inputIdx, neuronIdx)) 
 			p->bp_genome[g].bp_hidden[0].weight_adjust[neuronIdx][inputIdx]+=
 				p->input_layer_neuron_output[g][inputIdx]*p->delta_hidden_layer[g][0][neuronIdx];
 		g+=gridDim.x;
@@ -720,7 +761,7 @@ __global__ void cuAddAjustHiddenLayer(population_t *p) {
 		for(int i=1;i<HIDDEN_LAYER_NUM;i++) {
 			if(NN_CONNECT(p->ga_genome[g].ga_hidden[i].connect, neuronIdx2,neuronIdx1))
 				p->bp_genome[g].bp_hidden[i].weight_adjust[neuronIdx2][neuronIdx1]+=
-					p->hidden_layer_neuron_output[g][i][neuronIdx1]*p->delta_hidden_layer[g][i][neuronIdx2];
+					p->hidden_layer_neuron_output[g][i-1][neuronIdx1]*p->delta_hidden_layer[g][i][neuronIdx2];
 		}
 		g+=gridDim.x;
 	}
@@ -733,7 +774,7 @@ __global__ void cuAddAdjustOutputLayer(population_t *p) {
 	
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_OUTPUTS;i++) {
-			if(NN_CONNECT(p->ga_genome[g].ga_output.connect, i, neuronIdx)) 
+			if(NN_CONNECT_OUTPUT(p->ga_genome[g].ga_output.connect, i, neuronIdx)) 
 				p->bp_genome[g].bp_output.weight_adjust[i][neuronIdx]+=
 					p->hidden_layer_neuron_output[g][HIDDEN_LAYER_NUM-1][neuronIdx]*p->delta_output_layer[g][i];
 		}
@@ -761,7 +802,7 @@ __global__ void cuAdjustInputLayer(population_t *p) {
 	int inputIdx=threadIdx.x%NR_INPUTS;
 
 	while(g<POPULATION_SIZE) {
-		p->bp_genome[g].bp_input.weight[inputIdx]-=p->bp_genome[g].bp_input.weight_adjust[inputIdx];
+		p->bp_genome[g].bp_input.weight[inputIdx]-=LEARNING_RATE*p->bp_genome[g].bp_input.weight_adjust[inputIdx];
 #ifdef DEBUG
 		printf("p->bp_genome[%d].bp_input.weight_adjust[%d]=%f\n", g, inputIdx, p->bp_genome[g].bp_input.weight_adjust[inputIdx]);
 #endif
@@ -776,8 +817,8 @@ __global__ void cuAdjustHiddenLayerFromInputLayer(population_t *p) {
 	int inputIdx=threadIdx.y%NR_INPUTS;
 
 	while(g<POPULATION_SIZE) {
-		if(NN_CONNECT(p->ga_genome[g].ga_input.connect, neuronIdx, inputIdx))  {
-			p->bp_genome[g].bp_hidden[0].weight[neuronIdx][inputIdx]-=p->bp_genome[g].bp_hidden[0].weight_adjust[neuronIdx][inputIdx];
+		if(NN_CONNECT_INPUT(p->ga_genome[g].ga_input.connect, /*neuronIdx, inputIdx*/ inputIdx, neuronIdx))  {
+			p->bp_genome[g].bp_hidden[0].weight[neuronIdx][inputIdx]-=LEARNING_RATE*p->bp_genome[g].bp_hidden[0].weight_adjust[neuronIdx][inputIdx];
 #ifdef DEBUG
 			printf("p->bp_genome[%d].bp_hidden[0].weight_adjust[%d][%d]=%f\n", g, neuronIdx,inputIdx,p->bp_genome[g].bp_hidden[0].weight_adjust[neuronIdx][inputIdx]);
 #endif
@@ -795,7 +836,7 @@ __global__ void cuAjustHiddenLayer(population_t *p) {
 	while(g<POPULATION_SIZE) {
 		for(int i=1;i<HIDDEN_LAYER_NUM;i++) {
 			if(NN_CONNECT(p->ga_genome[g].ga_hidden[i].connect, neuronIdx2,neuronIdx1)) {
-				p->bp_genome[g].bp_hidden[i].weight[neuronIdx2][neuronIdx1]-=p->bp_genome[g].bp_hidden[i].weight_adjust[neuronIdx2][neuronIdx1];
+				p->bp_genome[g].bp_hidden[i].weight[neuronIdx2][neuronIdx1]-=LEARNING_RATE*p->bp_genome[g].bp_hidden[i].weight_adjust[neuronIdx2][neuronIdx1];
 #ifdef DEBUG
 				printf("p->bp_genome[%d].bp_hidden[%d].weight_adjust[%d][%d]=%f\n", g,i, neuronIdx2, neuronIdx1, p->bp_genome[g].bp_hidden[i].weight_adjust[neuronIdx2][neuronIdx1]);
 #endif
@@ -812,8 +853,8 @@ __global__ void cuAdjustOutputLayer(population_t *p) {
 	
 	while(g<POPULATION_SIZE) {
 		for(int i=0;i<NR_OUTPUTS;i++) {
-			if(NN_CONNECT(p->ga_genome[g].ga_output.connect, i, neuronIdx)) 
-				p->bp_genome[g].bp_output.weight[i][neuronIdx]-=p->bp_genome[g].bp_output.weight_adjust[i][neuronIdx];
+			if(NN_CONNECT_OUTPUT(p->ga_genome[g].ga_output.connect, i, neuronIdx)) 
+				p->bp_genome[g].bp_output.weight[i][neuronIdx]-=LEARNING_RATE*p->bp_genome[g].bp_output.weight_adjust[i][neuronIdx];
 		
 		}
 		g+=gridDim.x;
@@ -964,6 +1005,7 @@ __global__ void find_best_individual(population_t* population, float *deviceBest
 __host__ void host_find_best_individual(population_t *p, float *deviceBestIndividualFitness) {
 
 	find_best_individual<<<1,1>>>(p, deviceBestIndividualFitness);	
+	check_cuda_errors(__FILE__, __LINE__);
 }
 
 __global__ void copy_best_individuals (population_t * p1, population_t * p2)
@@ -993,12 +1035,12 @@ __global__ void cuError(population_t *p, IO_t *io, int sample) {
 		//ga_genome_t *ga_genome=&p->ga_genome[g];
 
 		float output=p->output_layer_neuron_output[g][oIdx];
-		float ed=powf(io->outputs[oIdx][sample] - output,2);
+		float ed=output-io->outputs[oIdx][sample];
 		p->error_derived[g][oIdx]=ed;
-		error[oIdx]=.5*ed;
+		error[oIdx]=.5*pow(ed,2);
 		p->error[g][oIdx]=error[oIdx];
 		
-		for(int stride=2>>1;stride>0;stride>>=1) {
+		for(int stride=16>>1;stride>0;stride>>=1) {
 			__syncthreads();
 			if(threadIdx.x<stride) {
 				error[threadIdx.x]+=error[threadIdx.x+stride];
@@ -1067,8 +1109,6 @@ void train(population_t *p, IO_t *io, int start_sample, int stop_sample) {
 			hoResetOutput(p);
 			check_cuda_errors(__FILE__,__LINE__);
 			hoResetInput(p);
-			check_cuda_errors(__FILE__,__LINE__);
-			hoResetMse(p);
 			check_cuda_errors(__FILE__,__LINE__);
 
 			hoExcite(p, io, sample);
@@ -1164,10 +1204,10 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
           do {
 			
 //			hoReset(population1);
+			  hoResetExceptWeights(population1);
 			  train(population1, io,start_sample, stop_sample);
 			  for(int i=start_sample; i<stop_sample;i++) {
 				  resetFitness(population1);
-				  //hoReset(population1);
 				  fitness(population1, io, i);
 			  }
 /*
@@ -1176,15 +1216,17 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 			  check_cuda_errors(__FILE__,__LINE__);
 */
 
-              if(g%1==0) {
+              if(g%10==0) {
 			  	  printf("generation %d\n", it);
 				  host_find_best_individual(population1,deviceBestIndividualFitness);
                   checkCudaErrors(cudaMemcpy(hostBestIndividualFitness, deviceBestIndividualFitness, sizeof(float), cudaMemcpyDeviceToHost));
 				  printf("%f %f\n", tmpFitness, *hostBestIndividualFitness);
-				  assert(tmpFitness <= *hostBestIndividualFitness);
+//				  assert(tmpFitness <= *hostBestIndividualFitness);
 			  	  tmpFitness=*hostBestIndividualFitness;
+				  printf("best fitness: %f %d-%d\n", *hostBestIndividualFitness,start_sample, stop_sample-1);
 				  print_best(population1, io, deviceBestIndividualFitness, start_sample, stop_sample);
-				  printf("best fitness: %f\n", *hostBestIndividualFitness);
+				  check_cuda_errors(__FILE__, __LINE__);
+				  printf("---------------------------------------\n");
               }
 
 //			  if(it>0) { // kvoli pocitaniu fitness, pri 0 este nie je vypocitany
@@ -1192,7 +1234,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 				  check_cuda_errors(__FILE__,__LINE__);
 //			  }
 
-		  	  host_find_best_individual(population1,deviceBestIndividualFitness);
+//		  	  host_find_best_individual(population1,deviceBestIndividualFitness);
 			  copy_best_individuals<<<POPULATION_SIZE/2,1>>> (population1, population2);
 			  check_cuda_errors(__FILE__,__LINE__);
 
@@ -1221,7 +1263,7 @@ void genetic (IO_t *io,population_t* population1, population_t* population2, flo
 }
 
 void read_io(IO_t &io) {
-#if 1
+#if 0
   const char* in[]={
 #include "switch_in.dat.1"
       };
