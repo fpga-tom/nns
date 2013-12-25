@@ -1,27 +1,35 @@
 #include "layered.h"
 
 const char *filename;
+const char *infile;
+const char *outfile;
 
 // ----------------------------------------------------------------------------------------------------
 //                       main function
 // ----------------------------------------------------------------------------------------------------
 
 void usage(char** argv) {
-	fprintf(stderr,"Usage %s [-n filename]\n", argv[0]);
+	fprintf(stderr,"Usage %s [-g genome] [-i indata] [-o outdata]\n", argv[0]);
 	exit(-1);
 
 }
 int main(int argc, char **argv) {
 
 	int opt;
-	if(argc<2) {
+	if(argc!=7) {
 		usage(argv);
 	}
 
-	while((opt=getopt(argc, argv, "n:"))!=-1) {
+	while((opt=getopt(argc, argv, "i:o:g:"))!=-1) {
 		switch(opt) {
-			case 'n':
+			case 'g':
 				filename=optarg;
+				break;
+			case 'i':
+				infile=optarg;
+				break;
+			case 'o':
+				outfile=optarg;
 				break;
 			default:
 				usage(argv);
@@ -37,14 +45,14 @@ int main(int argc, char **argv) {
 	IO_t tmp;
 	IO_t *io;
 
-	read_io(tmp);
+	read_io(tmp,infile, outfile);
 	
-	cuAllocPopulation(&p1);
-	cuAllocPopulation(&p2);
-/*
+//	cuAllocPopulation(&p1);
+//	cuAllocPopulation(&p2);
+
 	cudaMalloc((void**)&p1, sizeof(population_t));
 	cudaMalloc((void**)&p2, sizeof(population_t));
-*/
+
   	cudaMalloc((void**)&deviceBestIndividualFitness, sizeof(double));
 	cudaHostAlloc((void**)&hostBestIndividualFitness,sizeof(double), cudaHostAllocWriteCombined);
 	cudaMalloc((void**)&io,sizeof(IO_t));
