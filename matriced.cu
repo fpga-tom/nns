@@ -431,6 +431,11 @@ public:
 	}
 } nn_t;
 
+struct Autoencoder : public NeuralNet {
+	Autoencoder(int _inputNum, int _hiddenNum,std::vector<int> layerNeuronNum) : NeuralNet(_inputNum,_inputNum, 1, layerNeuronNum) {
+	}
+};
+
 // ----------------------------------------------------------------------------------------------------
 //                       main function
 // ----------------------------------------------------------------------------------------------------
