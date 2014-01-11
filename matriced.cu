@@ -107,18 +107,24 @@ public:
 	int cols;
 	thrust::device_vector<float> d_data;
 	Matrix(int _rows, int _cols) : rows(_rows), cols(_cols), d_data(rows*cols) {
+		thrust::fill(d_data.begin(), d_data.end(), 0.f);
+/*
 		for(int i=0;i<numel();i++) {
 			d_data[i]=0.f;
 		}
+*/
 	}
 	Matrix(int _size) : rows(_size), cols(_size), d_data(_size*_size) {
+		thrust::fill(d_data.begin(),d_data.end(), 0.f);
+/*
 		for(int i=0;i<numel();i++) {
 			d_data[i]=0.f;
 		}
+*/
 		for(int i=0;i<rows;i++)
 			d_data[IDX2C(i,i,rows)]=1.f;
 	}
-	int numel() {return rows*cols;}
+	__host__ __device__ int numel() const {return rows*cols;}
 	virtual ~Matrix() {
 		d_data.clear();
 		d_data.shrink_to_fit();
@@ -197,27 +203,71 @@ public:
 	}
 };
 
-inline float sigmoid(float signal) {
+__device__ inline float sigmoid(float signal) {
 	return 1./(1+exp(-1.*signal));
 }
 
-inline float sigmoid_derived(float signal) {
+__device__ inline float sigmoid_derived(float signal) {
 	float s=sigmoid(signal);
 	return s*(1-s);
 }
 
+__global__ void cuSigmoid(int numel,float* v, float* output) {
+	int vIdx=threadIdx.x;
+
+	while(vIdx<numel) {
+		output[vIdx]=sigmoid(v[vIdx]);
+		vIdx+=blockDim.x;
+	}
+}
+
+__global__ void cuSigmoidDerived(int numel, float* v, float* outputDerived,int rows) {
+	int vIdx=threadIdx.x;
+
+	while(vIdx<numel) {
+		outputDerived[IDX2C(vIdx,vIdx, rows)]=sigmoid_derived(v[vIdx]);
+		vIdx+=blockDim.x;
+	}
+}
+
 void sigmoid(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
+/*
 	for(int i=0;i<v->numel();i++) {
 		outputDerived->d_data[IDX2C(i,i, outputDerived->rows)]=sigmoid_derived(v->d_data[i]);
 		output->d_data[i]=sigmoid(v->d_data[i]);
 	}
+*/
+	cuSigmoid<<<1,16>>>(v->numel(), thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(output->d_data.data()));
+	cuSigmoidDerived<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
+}
+
+__global__ void cuLinear(int numel, float* v, float* output) {
+	int vIdx=threadIdx.x;
+
+	while(vIdx<numel) {
+		output[vIdx]=v[vIdx];
+		vIdx+=blockDim.x;
+	}
+}
+
+__global__ void cuLinearDerived(int numel, float* v, float* outputDerived,int rows) {
+	int vIdx=threadIdx.x;
+	
+	while(vIdx<numel) {
+		outputDerived[IDX2C(vIdx,vIdx,rows)]=1;
+		vIdx+=blockDim.x;
+	}
 }
 
 void linear(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
+/*
 	for(int i=0;i<v->numel();i++) {
 		outputDerived->d_data[IDX2C(i,i,outputDerived->rows)]=1;
 		output->d_data[i]=v->d_data[i];
 	}
+*/
+	cuLinear<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(output->d_data.data()));
+	cuLinearDerived<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
 }
 
 typedef void (*neuron_func_t)(vector_ptr, vector_ptr,matrix_ptr);
@@ -519,7 +569,7 @@ int main(int argc, char **argv) {
 	}
 */
 
-	int d[]={4,4,4,4,4,4,4,4};
+	int d[]={16,16};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(input_size,output_size,l,std::vector<int>(d, d+l));
 
