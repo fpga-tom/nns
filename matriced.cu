@@ -33,7 +33,7 @@
 #define SIGMOID_0 0
 #define LINEAR 1
 
-#define LEARNING_RATE 0.17
+#define LEARNING_RATE 0.3
 
 
 using namespace std;
@@ -94,12 +94,14 @@ struct IO {
 	}
 };
 
+class Autoencoder;
 class Layer;
 class Matrix;
 class Vector;
 typedef Layer* layer_ptr;
 typedef Matrix* matrix_ptr;
 typedef Vector* vector_ptr;
+typedef Autoencoder* autoencoder_ptr;
 
 class Matrix {
 public:
@@ -168,7 +170,7 @@ public:
 	virtual float operator[](const int idx) = 0;
 	virtual void set(int idx,float a) = 0;
 	void set(Vector &v) {
-		for(int i=0;i<numel(); i++) {
+		for(int i=0;i<numel() && i<v.numel(); i++) {
 			set(i, v[i]);
 		}
 	}
@@ -230,15 +232,19 @@ __global__ void cuSigmoidDerived(int numel, float* v, float* outputDerived,int r
 	}
 }
 
-void sigmoid(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
+void sigmoid(vector_ptr v, vector_ptr output, matrix_ptr outputDerived, bool last) {
 /*
 	for(int i=0;i<v->numel();i++) {
 		outputDerived->d_data[IDX2C(i,i, outputDerived->rows)]=sigmoid_derived(v->d_data[i]);
 		output->d_data[i]=sigmoid(v->d_data[i]);
 	}
 */
-	cuSigmoid<<<1,16>>>(v->numel(), thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(output->d_data.data()));
-	cuSigmoidDerived<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
+	cuSigmoid<<<1,16>>>(v->numel()-(last?0:1), thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(output->d_data.data()));
+	cuSigmoidDerived<<<1,16>>>(v->numel()-(last?0:1),thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
+	if(!last) {
+		output->d_data[v->numel()-1]=1.f;
+		outputDerived->d_data[IDX2C(v->numel()-1,v->numel()-1,outputDerived->rows)]=0.f;
+	}
 }
 
 __global__ void cuLinear(int numel, float* v, float* output) {
@@ -259,18 +265,22 @@ __global__ void cuLinearDerived(int numel, float* v, float* outputDerived,int ro
 	}
 }
 
-void linear(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
+void linear(vector_ptr v, vector_ptr output, matrix_ptr outputDerived, bool last) {
 /*
 	for(int i=0;i<v->numel();i++) {
 		outputDerived->d_data[IDX2C(i,i,outputDerived->rows)]=1;
 		output->d_data[i]=v->d_data[i];
 	}
 */
-	cuLinear<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(output->d_data.data()));
-	cuLinearDerived<<<1,16>>>(v->numel(),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
+	cuLinear<<<1,16>>>(v->numel()-(last?0:1),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(output->d_data.data()));
+	cuLinearDerived<<<1,16>>>(v->numel()-(last?0:1),thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(outputDerived->d_data.data()), outputDerived->rows);
+	if(!last) {
+		output->d_data[v->numel()-1]=1.f;
+		outputDerived->d_data[IDX2C(v->numel()-1,v->numel()-1,outputDerived->rows)]=0.f;
+	}
 }
 
-typedef void (*neuron_func_t)(vector_ptr, vector_ptr,matrix_ptr);
+typedef void (*neuron_func_t)(vector_ptr, vector_ptr,matrix_ptr,bool last);
 
 neuron_func_t neuron_func[]={sigmoid,linear};
 
@@ -282,6 +292,7 @@ void cublasMul(float alpha,float beta, matrix_ptr m1,cublasOperation_t transa, m
 	int lda=m1->rows;
 	int ldb=m2->rows;
 
+//	printf("%d %d\n", check1,check2);
 	assert(check1==check2);
 
 	p->rows=(transa==CUBLAS_OP_N?m1->rows:m1->cols);
@@ -307,6 +318,7 @@ inline void cublasMul(float alpha,float beta,matrix_ptr m1, matrix_ptr m2, matri
 inline void cublasSub(matrix_ptr m1, matrix_ptr m2, matrix_ptr p) {
 
 	assert(m1->rows==m2->rows);
+//	printf("%d %d\n",m1->cols, m2->cols);
 	assert(m1->cols==m2->cols);
 
 	int lda=m1->rows;
@@ -322,7 +334,7 @@ class Layer {
 public:
 	int neuronType;
 	int neuronNum;
-	bool bias;
+	int bias;
 	layer_ptr nextLayer;
 	layer_ptr prevLayer;
 	matrix_ptr nextMatrix;
@@ -336,11 +348,21 @@ public:
 	vector_ptr input;
 	matrix_ptr weightAdj;
 
-	Layer(int _neuronNum, int _neuronType, bool _bias=false) : neuronNum(_neuronNum), neuronType(_neuronType), bias(_bias), nextLayer(0), prevLayer(0), weightAdj(0) {
+	Layer(int _neuronNum, int _neuronType, bool _bias=true) : neuronNum(_neuronNum), neuronType(_neuronType), bias(_bias), nextLayer(0), prevLayer(0), weightAdj(0) {
 		cout << __PRETTY_FUNCTION__ << _neuronNum << endl;
-		output=new RowVector(neuronNum);
+/*
+		if(bias) {
+			output=new RowVector(neuronNum+1);
+			output->d_data[neuronNum]=1.f;
+			outputDerived=new Matrix(neuronNum,neuronNum+1);
+		} else {
+*/
+			output=new RowVector(neuronNum);
+			outputDerived=new Matrix(neuronNum,neuronNum);
+/*
+		}
+*/
 		input=new RowVector(neuronNum);
-		outputDerived=new Matrix(neuronNum,neuronNum);
 		delta=new ColVector(neuronNum);
 		error_derived=new RowVector(neuronNum);
 		unit=new Matrix(neuronNum);
@@ -355,23 +377,18 @@ public:
 	void excite() {
 		if(prevLayer!=0) {
 			cublasMul(prevLayer->output, prevMatrix, input);
-			neuron_func[neuronType](input,output, outputDerived);
+			neuron_func[neuronType](input,output, outputDerived,nextLayer==0);
 		}
-/*
 		if(nextLayer!=0)
 			nextLayer->excite();
-*/
 	}
-	void error(vector_ptr desiredOutput) {
+	layer_ptr error(vector_ptr desiredOutput) {
 		if(prevLayer!=0) {
 			cublasSub(output,desiredOutput,error_derived);
 			cublasMul(outputDerived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, delta);
 			
 		}
-/*
-		if(nextLayer!=0)
-			nextLayer->excite();
-*/
+		return this;
 	}
 
 	void backpropagation() {
@@ -380,10 +397,8 @@ public:
 			cublasMul(outputDerived, CUBLAS_OP_N, nextMatrix, CUBLAS_OP_N, &m);
 			cublasMul(&m,nextLayer->delta, delta);
 		}
-/*
 		if(prevLayer!=0)
 			prevLayer->backpropagation();
-*/
 	}
 
 	void adjust() {
@@ -417,50 +432,159 @@ public:
 	}
 };
 
+struct Autoencoder {
+	layer_ptr inputLayer;
+	layer_ptr hiddenLayer;
+	layer_ptr outputLayer;
+
+	autoencoder_ptr next;
+	autoencoder_ptr prev;
+	
+	Autoencoder(int _inputNum, int _hiddenNum) : next(0), prev(0) {
+		inputLayer=new Layer(_inputNum, SIGMOID_0);
+		hiddenLayer=new Layer(_hiddenNum, SIGMOID_0);
+		outputLayer=new Layer(_inputNum, LINEAR,false);
+
+		inputLayer->addTail(hiddenLayer);
+		inputLayer->addTail(outputLayer);
+
+		int bias=1;
+		for(layer_ptr i=inputLayer;i!=outputLayer;i=i->nextLayer) {
+			i->nextMatrix=new Matrix(i->neuronNum, i->nextLayer->neuronNum);
+			i->nextLayer->prevMatrix=i->nextMatrix;
+			i->nextMatrix->randomize();
+		}	
+	}
+
+	
+	void addTail(autoencoder_ptr autoencoder) {
+		autoencoder_ptr last=this;
+		while(last->next!=0) {
+			last=last->next;
+		}
+		last->next=autoencoder;
+		autoencoder->prev=last;
+	}
+
+	void excite(vector_ptr p) {
+		inputLayer->output->set(*p);
+		inputLayer->excite();
+	}
+	
+	void train(vector_ptr p) {
+		for(int i=0;i<1;i++) {
+				excite(p);
+				outputLayer->error(p)->backpropagation();
+				inputLayer->adjust();
+		}
+//		inputLayer->adjustAdd();
+/*
+		if(next!=0) {
+			next->train(hiddenLayer->output);
+		}
+*/
+	}
+};
+
 
 struct NeuralNet {
 	layer_ptr inputLayer;
 	layer_ptr outputLayer;
 	vector_ptr error;
+	autoencoder_ptr autoencoder;
+	autoencoder_ptr autoencoder_pretrain;
+	int bias;
 
 	NeuralNet() {};
 public:
-	NeuralNet(int _inputNum,int _outputNum, int _hiddenLayerNum, std::vector<int> layerNeuronNum) {
+	NeuralNet(int _inputNum,int _outputNum, int _hiddenLayerNum, std::vector<int> layerNeuronNum) : autoencoder(0), bias(1){
 		cout << __PRETTY_FUNCTION__ << endl;
 		error=new ColVector(_outputNum);
+		printf("_inputNum %d\n", _inputNum);
 		
 		inputLayer=new Layer(_inputNum, SIGMOID_0);
 		for(int i=0; i<_hiddenLayerNum;i++) {
+
+			if(autoencoder==0) {
+				autoencoder=new Autoencoder(_inputNum, layerNeuronNum[i]);
+			} else {
+				autoencoder->addTail(new Autoencoder(layerNeuronNum[i-1], layerNeuronNum[i]));
+			}
+
 			inputLayer->addTail(new Layer(layerNeuronNum[i], SIGMOID_0));
 		}
 
-		outputLayer=new Layer(_outputNum, LINEAR);
+		outputLayer=new Layer(_outputNum, LINEAR,false);
 		inputLayer->addTail(outputLayer);
+		autoencoder->addTail(new Autoencoder(layerNeuronNum[_hiddenLayerNum-1],_outputNum));
+
+		autoencoder_ptr a=autoencoder;
 
 		for(layer_ptr i=inputLayer;i!=outputLayer;i=i->nextLayer) {
-			i->nextMatrix=new Matrix(i->neuronNum, i->nextLayer->neuronNum);
+//			i->nextMatrix=new Matrix(i->neuronNum, i->nextLayer->neuronNum);
+			i->nextMatrix=a->inputLayer->nextMatrix;
 			i->nextLayer->prevMatrix=i->nextMatrix;
 			i->nextMatrix->randomize();
+			if(a!=0)
+				a=a->next;
+		}
+		autoencoder_pretrain=autoencoder;
+	}
+
+	void pretrain(vector_ptr p) {
+		autoencoder_ptr a=autoencoder;
+		if(a==autoencoder_pretrain) {
+			autoencoder_pretrain->train(p);
+		} else {
+				a->excite(p);
+				a=a->next;
+				while(a!=autoencoder_pretrain) {
+					a->excite(a->prev->hiddenLayer->output);
+					a=a->next;
+				}
+				autoencoder_pretrain->train(autoencoder_pretrain->prev->hiddenLayer->output);
 		}
 	}
+
+	void pretrainNext() {
+		autoencoder_pretrain=autoencoder_pretrain->next;
+	}
+
+	void pretrainAdjust() {
+		autoencoder_pretrain->inputLayer->adjustAdd();
+	}
+
+	
 	vector_ptr excite(vector_ptr p) {
 		inputLayer->output->set(*p);
+		inputLayer->excite();
+/*
 		layer_ptr layer=inputLayer->nextLayer;
+		layer->excite();
+*/
+/*
 		while(layer!=0) {
 			layer->excite();
 			layer=layer->nextLayer;
 		}
+*/
 		return outputLayer->output;
 	}
 
 	void backpropagation(vector_ptr desiredOutput) {
 		layer_ptr layer=outputLayer;
-		layer->error(desiredOutput);
+		layer->error(desiredOutput)->backpropagation();
+/*
 		layer=layer->prevLayer;
+		layer->backpropagation();
+*/
+
+/*
 		while(layer!=0) {
 			layer->backpropagation();
 			layer=layer->prevLayer;
 		}
+*/
 		inputLayer->adjust();
 	}
 
@@ -481,10 +605,6 @@ public:
 	}
 } nn_t;
 
-struct Autoencoder : public NeuralNet {
-	Autoencoder(int _inputNum, int _hiddenNum,std::vector<int> layerNeuronNum) : NeuralNet(_inputNum,_inputNum, 1, layerNeuronNum) {
-	}
-};
 
 // ----------------------------------------------------------------------------------------------------
 //                       main function
@@ -569,13 +689,33 @@ int main(int argc, char **argv) {
 	}
 */
 
-	int d[]={16,16};
+	int d[]={15+1,8+1,8+1,8+1,8+1,8+1,8+1,8+1};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(input_size,output_size,l,std::vector<int>(d, d+l));
 
 	RowVector v(input_size);
 	RowVector v1(output_size);
-for(int k=0;k<5000;k++) {
+#if 1
+	cout << "pretraining ..." << endl;
+	for(int r=0;r<l;r++) {
+			cout << "autoencoder " << r << endl;
+			for(int k=0;k<300;k++) {
+					for(int i=0;i<samples;i++) {
+						for(int j=0;j<input_size;j++) {
+							v.set(j,io.input[IDX2C(j,i,input_size)]);
+						}
+						for(int j=0;j<output_size; j++) {
+							v1.set(j, io.output[IDX2C(j,i,output_size)]);
+						}
+						nn.pretrain(&v);
+					}
+//					nn.pretrainAdjust();
+			}
+			nn.pretrainNext();
+	}
+#endif
+	cout << "training ..." << endl;
+for(int k=0;k<40000;k++) {
 if(k%50==0)
 		cout << k << endl;
 	for(int i=0;i<samples;i++) {
@@ -586,31 +726,31 @@ if(k%50==0)
 			v1.set(j, io.output[IDX2C(j,i,output_size)]);
 		}
 		vector_ptr o=nn.excite(&v);
-if(k%50==0) {
-		cout << "input: ";
-		v.printd();
-		cout << " output: ";
-		v1.printd();
-//		cout << endl;
-		cout << "fit: ";
-		o->print();
-		cout << " ";
-		int ham=0;
-		for(int r=0;r<output_size;r++) {
-			int a=o->d_data[r]>.5?1:0;
-			int b=v1.d_data[r]>.5?1:0;
-			ham+=a^b;
-			printf("%d,", a);
+		if(k%50==0) {
+				cout << "input: ";
+				v.printd();
+				cout << " output: ";
+				v1.printd();
+		//		cout << endl;
+				cout << "fit: ";
+				o->print();
+				cout << " ";
+				int ham=0;
+				for(int r=0;r<output_size;r++) {
+					int a=o->d_data[r]>.5?1:0;
+					int b=v1.d_data[r]>.5?1:0;
+					ham+=a^b;
+					printf("%d,", a);
+				}
+				cout << " distance: " << ham;
+				cout << endl;
 		}
-		cout << " distance: " << ham;
-		cout << endl;
-}
 
 		nn.backpropagation(&v1);
 	}
 //	nn.adjust();
-if(k%50==0)
-		cout << "-------------------------------------------------------------------------" << endl;
+	if(k%50==0)
+			cout << "-------------------------------------------------------------------------" << endl;
 }
 
 	status=cublasDestroy(handle);
