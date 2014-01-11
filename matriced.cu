@@ -31,8 +31,9 @@
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
 
 #define SIGMOID_0 0
+#define LINEAR 1
 
-#define LEARNING_RATE 0.1
+#define LEARNING_RATE 0.17
 
 
 using namespace std;
@@ -109,12 +110,6 @@ public:
 		for(int i=0;i<numel();i++) {
 			d_data[i]=0.f;
 		}
-/*
-		h_data=new float[rows*cols];
-		cudaMalloc((void**)d_data, sizeof(float)*rows*cols);
-		memset(h_data, 0, sizeof(float)*rows*cols);
-		cudaMemcpy(d_data, h_data, sizeof(float)*rows*cols);
-*/
 	}
 	Matrix(int _size) : rows(_size), cols(_size), d_data(_size*_size) {
 		for(int i=0;i<numel();i++) {
@@ -127,10 +122,6 @@ public:
 	virtual ~Matrix() {
 		d_data.clear();
 		d_data.shrink_to_fit();
-/*
-		delete [] h_data;
-		cudaFree(d_data);
-*/
 	}
 
 	void print() {
@@ -202,7 +193,6 @@ public:
 			return d_data[IDX2C(0,idx, rows)];
 	}
 	virtual void set(int idx, float a) {
-//		cout << "idx " << IDX2C(0,idx,rows) << endl;
 		d_data[IDX2C(0,idx,rows)]=a;
 	}
 };
@@ -217,32 +207,36 @@ inline float sigmoid_derived(float signal) {
 }
 
 void sigmoid(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
-//	cout << "numel " << v->numel() << endl;
 	for(int i=0;i<v->numel();i++) {
 		outputDerived->d_data[IDX2C(i,i, outputDerived->rows)]=sigmoid_derived(v->d_data[i]);
 		output->d_data[i]=sigmoid(v->d_data[i]);
 	}
 }
 
+void linear(vector_ptr v, vector_ptr output, matrix_ptr outputDerived) {
+	for(int i=0;i<v->numel();i++) {
+		outputDerived->d_data[IDX2C(i,i,outputDerived->rows)]=1;
+		output->d_data[i]=v->d_data[i];
+	}
+}
+
+typedef void (*neuron_func_t)(vector_ptr, vector_ptr,matrix_ptr);
+
+neuron_func_t neuron_func[]={sigmoid,linear};
+
 
 void cublasMul(float alpha,float beta, matrix_ptr m1,cublasOperation_t transa, matrix_ptr m2, cublasOperation_t transb, matrix_ptr p) {
-/*
-	cout << "m1 rows: " << m1->rows << " cols " << m1->cols << endl;
-	cout << "m2 rows: " << m2->rows << " cols " << m2->cols << endl;
-	cout << "p rows: " << p->rows << " cols " << p->cols << endl;
-*/
 	int check1=(transa==CUBLAS_OP_N?m1->cols:m1->rows);
 	int check2=(transb==CUBLAS_OP_N?m2->rows:m2->cols);
 
-	int lda=m1->rows;//(transa==CUBLAS_OP_N?m1->rows:m1->cols);
-	int ldb=m2->rows;//(transb==CUBLAS_OP_N?m2->rows:m2->cols);
+	int lda=m1->rows;
+	int ldb=m2->rows;
 
 	assert(check1==check2);
 
 	p->rows=(transa==CUBLAS_OP_N?m1->rows:m1->cols);
 	p->cols=(transb==CUBLAS_OP_N?m2->cols:m2->rows);
 
-//	cout << "new p rows: " << p->rows << " cols " << p->cols << endl;
 
 	cublasStatus_t status = cublasSgemm (handle, transa, transb, p->rows, p->cols, check1, &alpha, thrust::raw_pointer_cast (m1->d_data.data()), lda, thrust::raw_pointer_cast (m2->d_data.data()), ldb, &beta, thrust::raw_pointer_cast (p->d_data.data()), p->rows);
 	if (status != CUBLAS_STATUS_SUCCESS) {
@@ -265,16 +259,10 @@ inline void cublasSub(matrix_ptr m1, matrix_ptr m2, matrix_ptr p) {
 	assert(m1->rows==m2->rows);
 	assert(m1->cols==m2->cols);
 
-	int lda=m1->rows;//(transa==CUBLAS_OP_N?m1->rows:m1->cols);
-	int ldb=m2->rows;//(transb==CUBLAS_OP_N?m2->rows:m2->cols);
+	int lda=m1->rows;
+	int ldb=m2->rows;
 	float alpha=1.f;
 	float beta=-1.f;
-/*
-	cout << lda <<endl;
-	cout << ldb << endl;
-	cout << m2->cols << endl;
-	cout << p->rows << endl;
-*/
 	cublasStatus_t status=cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N, m1->rows, m2->cols, &alpha, thrust::raw_pointer_cast(m1->d_data.data()), lda, &beta, thrust::raw_pointer_cast(m2->d_data.data()), ldb, thrust::raw_pointer_cast(p->d_data.data()), p->rows);
 }
 
@@ -315,20 +303,9 @@ public:
 	}
 
 	void excite() {
-//		cout << __PRETTY_FUNCTION__ << neuronNum << endl;
 		if(prevLayer!=0) {
-/*
-			prevMatrix->print();
-			cout << endl;
-*/
 			cublasMul(prevLayer->output, prevMatrix, input);
-//			input->print();
-			sigmoid(input,output, outputDerived);
-/*
-			cout << "--------------------------------------------------" << endl;
-			outputDerived->print();
-			cout << "--------------------------------------------------" << endl;
-*/
+			neuron_func[neuronType](input,output, outputDerived);
 		}
 /*
 		if(nextLayer!=0)
@@ -336,29 +313,10 @@ public:
 */
 	}
 	void error(vector_ptr desiredOutput) {
-//		cout << __PRETTY_FUNCTION__ << endl;
-//		delta->set(*desiredOutput);
 		if(prevLayer!=0) {
 			cublasSub(output,desiredOutput,error_derived);
-//			delta->set(*deltat);
 			cublasMul(outputDerived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, delta);
 			
-/*
-			printf("*****----------------------\n");
-			output->print();
-			cout << endl;
-			desiredOutput->print();
-			cout << endl;
-			error_derived->print();
-			printf("\n*****----------------------\n");
-*/
-/*
-			cublasMul(1.f,-1.f,prevLayer->output,prevMatrix, delta);
-			int cols=delta->cols;
-			delta->cols=delta->rows;
-			delta->rows=cols;
-*/
-	//		sigmoid(output,output, outputDerived);
 		}
 /*
 		if(nextLayer!=0)
@@ -367,15 +325,11 @@ public:
 	}
 
 	void backpropagation() {
-//		cout << __PRETTY_FUNCTION__ << endl;
 		if(nextLayer!=0 && prevLayer!=0) {
-//			cout << nextLayer->neuronNum << endl;
-//			cublasMul(nextMatrix, CUBLAS_OP_N, nextLayer->delta, CUBLAS_OP_N, delta);
 			Matrix m(outputDerived->rows, nextMatrix->cols);
 			cublasMul(outputDerived, CUBLAS_OP_N, nextMatrix, CUBLAS_OP_N, &m);
 			cublasMul(&m,nextLayer->delta, delta);
 		}
-		//cublasMul(outputDerived, delta, delta);
 /*
 		if(prevLayer!=0)
 			prevLayer->backpropagation();
@@ -383,21 +337,11 @@ public:
 	}
 
 	void adjust() {
-//		cout << __PRETTY_FUNCTION__ << endl;
 		if(prevLayer!=0) {
 			if(weightAdj==0)
 				weightAdj=new Matrix(prevMatrix->cols, prevMatrix->rows);
 			cublasMul(LEARNING_RATE, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
-//			cout << "weight adj: ";
-//			weightAdj.print();
-//			cout << endl;
-//			cout << "****************************"<<endl;
-//		unit->print();
-//			cout << "****************************"<<endl;
-//			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
-//			prevMatrix->print();
-//			cout << endl;
 		}
 		if(nextLayer!=0)
 			nextLayer->adjust();
@@ -440,7 +384,7 @@ public:
 			inputLayer->addTail(new Layer(layerNeuronNum[i], SIGMOID_0));
 		}
 
-		outputLayer=new Layer(_outputNum, SIGMOID_0);
+		outputLayer=new Layer(_outputNum, LINEAR);
 		inputLayer->addTail(outputLayer);
 
 		for(layer_ptr i=inputLayer;i!=outputLayer;i=i->nextLayer) {
@@ -570,7 +514,7 @@ int main(int argc, char **argv) {
 	}
 */
 
-	int d[]={32,32};
+	int d[]={4,4,4,4,4,4,4,4};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(input_size,output_size,l,std::vector<int>(d, d+l));
 
