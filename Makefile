@@ -1,6 +1,9 @@
+matriced1:matriced1.cu
+	#g++ -g -std=c++0x -o matriced matriced.cc
+	nvcc -O3 -gencode arch=compute_30,code=sm_30 -o matriced1 matriced1.cu -I./inc -lcublas
 matriced:matriced.cu
 	#g++ -g -std=c++0x -o matriced matriced.cc
-	nvcc -O3  -gencode arch=compute_30,code=sm_30 -o matriced matriced.cu -I./inc -lcublas
+	nvcc -O3 -gencode arch=compute_30,code=sm_30 -o matriced matriced.cu -I./inc -lcublas
 cublas:cublas.cu
 	nvcc -O3 -gencode arch=compute_30,code=sm_30 -o cublas cublas.cu -I./inc -lcublas
 #	nvcc -O0 -G -g -gencode arch=compute_30,code=sm_30 --compiler-options "-std=c++0x" -o matriced matriced.cu -I./inc
