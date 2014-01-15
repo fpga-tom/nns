@@ -29,14 +29,14 @@
 
 
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
-#define IDX3C(i,j,k,rows,cols) (k*rows*cols+IDX2C(i,j,rows))
+#define IDX3C(i,j,k,rows,cols) (k*(rows)*(cols)+IDX2C(i,j,rows))
 
 #define SIGMOID_0 0
 #define LINEAR 1
 
-#define LEARNING_RATE 0.2
+#define LEARNING_RATE 0.029
 #define SPARSITY .05f
-#define SPARSITY_WEIGHT .2f
+#define SPARSITY_WEIGHT .05f
 
 
 using namespace std;
@@ -58,6 +58,16 @@ typedef Cube* cube_ptr;
 typedef Matrix* matrix_ptr;
 typedef Vector* vector_ptr;
 typedef Autoencoder* autoencoder_ptr;
+
+inline void check_cuda_errors(const char *filename, const int line_number)
+{
+      cudaDeviceSynchronize();
+      cudaError_t error = cudaGetLastError();
+      if(error != cudaSuccess) {
+          printf("CUDA error at %s:%i: %s\n", filename, line_number, cudaGetErrorString(error));
+          exit(-1);
+      }
+}
 
 class Cube {
 public:
@@ -88,7 +98,7 @@ public:
 
 	void randomize() {
 		for(int i=0;i<numel();i++) {
-			d_data[i]=(((float)rand())/RAND_MAX)/5.;
+			d_data[i]=(((float)rand())/RAND_MAX)/10.;
 		}
 	}
 };
@@ -96,6 +106,35 @@ public:
 class MatrixBatched : public Cube {
 public:
 	MatrixBatched(int _rows, int _cols, int _batchSize) : Cube(_rows, _cols, _batchSize) {
+	}
+
+	void print(int l) {
+		thrust::host_vector<float> hv(d_data.begin(), d_data.end());
+		for(int i=0;i<rows;i++) {
+			for(int j=0;j<cols;j++) {
+				cout << hv[IDX3C(i,j,l,rows,cols)] << ",";
+			}
+//			printf("\n");
+		}
+	}
+	void _printf(int l) {
+		thrust::host_vector<float> hv(d_data.begin(), d_data.end());
+		for(int i=0;i<rows;i++) {
+			for(int j=0;j<cols;j++) {
+				printf("%02.3f,",hv[IDX3C(i,j,l,rows,cols)] );
+			}
+//			printf("\n");
+		}
+	}
+
+	void println(int l) {
+		thrust::host_vector<float> hv(d_data.begin(), d_data.end());
+		for(int i=0;i<rows;i++) {
+			for(int j=0;j<cols;j++) {
+				printf("%f,",hv[IDX3C(i,j,l,rows,cols)] );
+			}
+			printf("\n");
+		}
 	}
 };
 
@@ -265,60 +304,65 @@ __device__ inline float sigmoid_derived(float signal) {
 	return s*(1-s);
 }
 
-__global__ void cuSigmoid(int rows, int cols,float* v, float* output) {
-	int vIdx=threadIdx.x;
-	int bIdx=threadIdx.y;
+__global__ void cuSigmoid(int rows, int cols,int levels,float* v, float* output) {
+	int l=blockIdx.x;
 
-	while(bIdx<rows) {
-			while(vIdx<cols) {
-				output[IDX2C(bIdx,vIdx,rows)]=sigmoid(v[IDX2C(bIdx,vIdx,rows)]);
-				vIdx+=blockDim.x;
-			}
-			bIdx+=blockDim.y;
+	while(l<levels) {
+		int vIdx=threadIdx.x;
+					while(vIdx<cols) {
+						output[IDX3C(0,vIdx,l,rows,cols)]=sigmoid(v[IDX3C(0,vIdx,l,rows,cols)]);
+						//assert(output[IDX3C(0,vIdx,l,rows,cols)]==output[IDX3C(0,vIdx,l,rows,cols)]);
+						vIdx+=blockDim.x;
+					}
+			l+=gridDim.x;
 	}
 }
 
-__global__ void cuSigmoidDerived(int rows, int cols,float* v, float* outputDerived) {
-	int vIdx=threadIdx.x;
-	int bIdx=threadIdx.y;
+__global__ void cuSigmoidDerived(int rows, int cols, int levels, float* v, float* outputDerived) {
 
-	while(bIdx<rows) {
-			while(vIdx<cols) {
-				outputDerived[IDX3C(vIdx,vIdx, bIdx, cols, cols)]=sigmoid_derived(v[IDX2C(bIdx,vIdx, rows)]);
-				vIdx+=blockDim.x;
-			}
-			bIdx+=blockDim.y;
+	int l=blockIdx.x;
+
+	while(l<levels) {
+
+		int vIdx=threadIdx.x;
+					while(vIdx<cols) {
+						outputDerived[IDX3C(vIdx,vIdx, l, cols, cols)]=sigmoid_derived(v[IDX3C(0,vIdx,l, rows,cols)]);
+						vIdx+=blockDim.x;
+					}
+		l+=gridDim.x;
 	}
 }
 
 void sigmoid(vectorb_ptr v, vectorb_ptr output, matrixb_ptr outputDerived, bool last) {
-	cuSigmoid<<<1,dim3(16,v->rows<16?v->rows:16,v->cols)>>>(v->rows, v->cols, thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(output->d_data.data()));
-	cuSigmoidDerived<<<1,dim3(16,v->rows<16?v->rows:16, v->cols)>>>(v->rows, v->cols, thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(outputDerived->d_data.data()));
+	cuSigmoid<<<16,16>>>(v->rows, v->cols, v->levels, thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(output->d_data.data()));
+	cuSigmoidDerived<<<16,16>>>(v->rows, v->cols,v->levels, thrust::raw_pointer_cast(v->d_data.data()), thrust::raw_pointer_cast(outputDerived->d_data.data()));
 }
 
-__global__ void cuLinear(int rows, int cols, float* v, float* output) {
-	int vIdx=threadIdx.x;
-	int bIdx=threadIdx.y;
+__global__ void cuLinear(int rows, int cols, int levels, float* v, float* output) {
 
-	while(bIdx<rows) {
-			while(vIdx<cols) {
-				output[IDX2C(bIdx,vIdx,rows)]=v[IDX2C(bIdx,vIdx, rows)];
-				vIdx+=blockDim.x;
-			}
-			bIdx+=blockDim.y;
+	int l=blockIdx.x;
+
+	while(l<levels) {
+		int vIdx=threadIdx.x;
+					while(vIdx<cols) {
+						output[IDX3C(0,vIdx,l,rows,cols)]=v[IDX3C(0,vIdx, l,rows,cols)];
+						vIdx+=blockDim.x;
+					}
+		l+=gridDim.x;
 	}
 }
 
-__global__ void cuLinearDerived(int rows, int cols, float* v, float* outputDerived) {
-	int vIdx=threadIdx.x;
-	int bIdx=threadIdx.y;
+__global__ void cuLinearDerived(int rows, int cols, int levels, float* v, float* outputDerived) {
 	
-	while(bIdx<rows) {
-			while(vIdx<cols) {
-				outputDerived[IDX3C(vIdx,vIdx,bIdx,cols,cols)]=1;
-				vIdx+=blockDim.x;
-			}
-			bIdx+=blockDim.y;
+	int l=blockIdx.x;
+
+	while(l<levels) {
+	int vIdx=threadIdx.x;
+					while(vIdx<cols) {
+						outputDerived[IDX3C(vIdx,vIdx,l,cols,cols)]=1;
+						vIdx+=blockDim.x;
+					}
+			l+=gridDim.x;
 	}
 }
 
@@ -329,8 +373,8 @@ void linear(vectorb_ptr v, vectorb_ptr output, matrixb_ptr outputDerived, bool l
 		output->d_data[i]=v->d_data[i];
 	}
 */
-	cuLinear<<<1,dim3(16,v->rows<16?v->rows:16)>>>(v->rows, v->cols, thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(output->d_data.data()));
-	cuLinearDerived<<<1,dim3(16,v->rows<16?v->rows:16)>>>(v->rows, v->cols,thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(outputDerived->d_data.data()));
+	cuLinear<<<16,16>>>(v->rows, v->cols, v->levels, thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(output->d_data.data()));
+	cuLinearDerived<<<16,16>>>(v->rows, v->cols, v->levels, thrust::raw_pointer_cast(v->d_data.data()),thrust::raw_pointer_cast(outputDerived->d_data.data()));
 /*
 	if(!last) {
 		output->d_data[v->numel()-1]=1.f;
@@ -608,25 +652,46 @@ void mulElementwiseT(matrix_ptr m1, matrix_ptr m2, matrix_ptr p) {
 }
 
 __global__ void cuSum(int rows, int cols, int levels, float *a) {
-	int row=threadIdx.y;
-	int col=threadIdx.z; 
+	int row=threadIdx.x;
 
 	while(row<rows) {
+		int col=threadIdx.y; 
+
 		while(col<cols) {
+			for(int k=1;k<levels;k++) {
+				a[IDX3C(row,col,0,rows,cols)]+= a[IDX3C(row,col,k,rows,cols)];
+			}
+/*
+			printf("levels %d\n", levels);
 			for(int stride=levels>>1;stride>0;stride>>=1) {
 				__syncthreads();
-				if(threadIdx.x<stride) {
-					a[IDX3C(row,col,threadIdx.x,rows,cols)]+=a[IDX3C(row,col,threadIdx.x+stride,rows,cols)];
+//				printf("stride: %d\n", stride);
+				if(threadIdx.z<stride) {
+					a[IDX3C(row,col,threadIdx.z,rows,cols)]+=a[IDX3C(row,col,threadIdx.z+stride,rows,cols)];
 				}
 			}
-			col+=blockDim.z;
+*/
+			col+=blockDim.y;
 		}
-		row+=blockDim.y;
+		row+=blockDim.x;
 	}
 }
 
 void mySum(matrixb_ptr m) {
-	cuSum<<<1,dim3(m->levels, 8, 8)>>>(m->rows, m->cols, m->levels, thrust::raw_pointer_cast(m->d_data.data()));
+
+//	cout << m->rows << " " << m->cols << " " << m->levels << endl;
+	cuSum<<<1,dim3( m->rows, m->cols)>>>(m->rows, m->cols, m->levels, thrust::raw_pointer_cast(m->d_data.data()));
+	check_cuda_errors(__FILE__, __LINE__);
+
+
+/*
+	for(int i=0;i<m->rows;i++)
+		for(int j=0;j<m->cols;j++) {
+			for(int k=1;k<m->levels;k++) {
+				m->d_data[IDX3C(i,j,0,m->rows,m->cols)]+= m->d_data[IDX3C(i,j,k,m->rows,m->cols)];
+			}
+		}
+*/
 }
 
 
@@ -650,6 +715,7 @@ public:
 	vectorb_ptr delta;
 	vector_ptr sparsity;
 	vectorb_ptr error_derived;
+	vectorb_ptr mse;
 	matrix_ptr unit;
 	vectorb_ptr input;
 	matrixb_ptr weightAdj;
@@ -670,6 +736,7 @@ public:
 		delta=new ColVectorBatched(neuronNum, batchSize);
 		sparsity=new ColVector(neuronNum);
 		error_derived=new RowVectorBatched(neuronNum,batchSize);
+		mse=new RowVectorBatched(1,batchSize);
 		unit=new Matrix(neuronNum);
 
 	}	
@@ -684,6 +751,11 @@ public:
 			cublasMul(prevLayer->output, prevMatrix, input);
 			//cublasAdd(input, bias, input);
 			neuron_func[neuronType](input,output, outputDerived,nextLayer==0);
+/*
+cout << "output////////////////////////" << endl;
+			outputDerived->println(1);
+cout << "////////////////////////" << endl;
+*/
 			activation->copy(output);
 			mySum(activation);
 			activationNum+=batchSize;
@@ -694,6 +766,14 @@ public:
 	layer_ptr error(vectorb_ptr desiredOutput) {
 		if(prevLayer!=0) {
 			cublasSub(output,desiredOutput,error_derived);
+
+			cublasMul(error_derived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, mse);
+			mySum(mse);
+/*
+cout << "*-------------------------" << endl;
+			error_derived->print(3);
+cout << "*-------------------------" << endl;
+*/
 			cublasMul(outputDerived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, delta);
 //			mulElementwiseT(outputDerived, error_derived, delta);
 			
@@ -703,7 +783,7 @@ public:
 
 	void backpropagation() {
 		if(nextLayer!=0 && prevLayer!=0) {
-			Matrix m(outputDerived->rows, nextMatrix->cols);
+			MatrixBatched m(outputDerived->rows, nextMatrix->cols,batchSize);
 			cublasMul(outputDerived, CUBLAS_OP_N, nextMatrix, CUBLAS_OP_N, &m);
 			cublasMul(&m,nextLayer->delta, delta);
 		}
@@ -722,10 +802,11 @@ public:
 //			cublasMul(-1./SPARSITY, activation);
 
 			for(int i=0;i<sparsity->numel();i++) {
-				sparsity->d_data[i]=-(SPARSITY/(activation->d_data[i]/activationNum)) + (1-SPARSITY)/(1-(activation->d_data[i]/activationNum));
-				cout << ((activation->d_data[i]/activationNum)) << "," << sparsity->d_data[i] << ",";
+				float a=activation->d_data[IDX3C(0,i,0,activation->rows, activation->cols)]/activationNum;
+				sparsity->d_data[i]=-(SPARSITY/a) + (1-SPARSITY)/(1-a);
+//				cout << a << ",";
 			}
-			cout << endl;
+//			cout << endl;
 /*
 			cout << "sparsity ";
 			sparsity->print();
@@ -761,7 +842,7 @@ public:
 			if(weightAdj==0)
 				weightAdj=new MatrixBatched(prevMatrix->cols, prevMatrix->rows, batchSize);
 			//printf("delta %d %d\n", delta->rows, delta->cols);
-			cublasMul(LEARNING_RATE, 1.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
+			cublasMul(1./*LEARNING_RATE*/, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 //			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
 //			cublasMul(-LEARNING_RATE, 1.f, delta, CUBLAS_OP_T, unit, CUBLAS_OP_N, bias);
 		}
@@ -772,7 +853,7 @@ public:
 	void adjustAdd() {
 		if(prevLayer!=0) {
 			mySum(weightAdj);
-			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
+			cublasMul(-LEARNING_RATE, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
 			weightAdj->reset();
 //			cublasMul(0.f,0.f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 		}
@@ -895,12 +976,14 @@ public:
 		if(a==autoencoder_pretrain) {
 			autoencoder_pretrain->train(p);
 		} else {
+			/*
 				a->excite(p);
 				a=a->next;
 				while(a!=autoencoder_pretrain) {
 					a->excite(a->prev->hiddenLayer->output);
 					a=a->next;
 				}
+*/
 				autoencoder_pretrain->train(autoencoder_pretrain->prev->hiddenLayer->output);
 		}
 	}
@@ -920,7 +1003,7 @@ public:
 	}
 
 	
-	vectorb_ptr excite(matrix_ptr p) {
+	vectorb_ptr excite(vectorb_ptr p) {
 		inputLayer->output->copy(p);
 		inputLayer->excite();
 /*
@@ -1056,28 +1139,17 @@ int main(int argc, char **argv) {
 	}
 */
 
-	int d[]={8};
+	int d[]={16};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(samples,input_size,output_size,l,std::vector<int>(d, d+l));
 
-	RowVector v(input_size);
-	RowVector v1(output_size);
+
+	
 #if 1
 	cout << "pretraining ..." << endl;
 	for(int r=0;r<l;r++) {
 			cout << "autoencoder " << r << endl;
-			for(int k=0;k<3500;k++) {
-/*
-					for(int i=0;i<samples;i++) {
-						for(int j=0;j<input_size;j++) {
-							v.set(j,io.input[IDX2C(j,i,input_size)]);
-						}
-						for(int j=0;j<output_size; j++) {
-							v1.set(j, io.output[IDX2C(j,i,output_size)]);
-						}
-						nn.pretrain(&v);
-					}
-*/
+			for(int k=0;k<20000;k++) {
 					nn.pretrain(io.input);
 					nn.nextRound();
 //					nn.pretrainAdjust();
@@ -1086,44 +1158,43 @@ int main(int argc, char **argv) {
 	}
 #endif
 	cout << "training ..." << endl;
-#if 0
-for(int k=0;k<400000;k++) {
-if(k%50==0)
+#if 1
+	ofstream mseFile("./mse.dat");
+for(int k=0;k<100000;k++) {
+if(k%100==0)
 		cout << k << endl;
-	for(int i=0;i<samples;i++) {
-		for(int j=0;j<input_size;j++) {
-			v.set(j,io.input[IDX2C(j,i,input_size)]);
-		}
-		for(int j=0;j<output_size; j++) {
-			v1.set(j, io.output[IDX2C(j,i,output_size)]);
-		}
-		matrix_ptr o=nn.excite(&v);
-		if(k%50==0) {
+
+		vectorb_ptr o=nn.excite(io.input);
+		nn.backpropagation(io.output);
+		nn.adjust();
+		mseFile << k << "\t" << nn.outputLayer->mse->d_data[0] << endl;
+		if(k%100==0) {
+			for(int i=0;i<samples;i++) {
 				cout << "input: ";
-				v.printd();
+				io.input->print(i);
 				cout << " output: ";
-				v1.printd();
-		//		cout << endl;
+				io.output->print(i);
 				cout << "fit: ";
-				o->print();
+				o->_printf(i);
 				cout << " ";
+//				cout << "err: "; nn.outputLayer->error_derived->print(i); 
 				int ham=0;
 				for(int r=0;r<output_size;r++) {
-					int a=o->d_data[r]>.5?1:0;
-					int b=v1.d_data[r]>.5?1:0;
+					int a=o->d_data[IDX3C(0,r,i,o->rows, o->cols)]>.5?1:0;
+					int b=io.output->d_data[IDX3C(0,r,i,io.output->rows, io.output->cols)]>.5?1:0;
 					ham+=a^b;
 					printf("%d,", a);
 				}
 				cout << " distance: " << ham;
 				cout << endl;
+			}
 		}
 
-		nn.backpropagation(&v1);
-	}
-	nn.adjust();
-	if(k%50==0)
+	if(k%100==0)
 			cout << "-------------------------------------------------------------------------" << endl;
 }
+
+	mseFile.close();
 
 #endif
 	status=cublasDestroy(handle);
