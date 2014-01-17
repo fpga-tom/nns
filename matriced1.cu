@@ -34,10 +34,14 @@
 #define SIGMOID_0 0
 #define LINEAR 1
 
-#define LEARNING_RATE 0.115
+#define LEARNING_RATE 0.2215
+#define LEARNING_RATE_AUTOENCODER 0.1595
 #define SPARSITY .05f
-#define SPARSITY_WEIGHT .28f
+#define SPARSITY_WEIGHT .11f
 
+
+
+//#define DEBUG
 
 using namespace std;
 
@@ -59,6 +63,8 @@ typedef Matrix* matrix_ptr;
 typedef Vector* vector_ptr;
 typedef Autoencoder* autoencoder_ptr;
 
+float learningRate=LEARNING_RATE_AUTOENCODER;
+
 inline void check_cuda_errors(const char *filename, const int line_number)
 {
       cudaDeviceSynchronize();
@@ -76,11 +82,12 @@ public:
 	int levels;
 
 	thrust::device_vector<float> d_data;
-	thrust::device_vector<float*> d_data_ptr;
+//	thrust::device_vector<float*> d_data_ptr;
 
-	Cube(int _rows, int _cols, int _levels, bool r=false) : rows(_rows), cols(_cols), levels(_levels), d_data(_rows*_cols*_levels),d_data_ptr(_levels) {
+	Cube(int _rows, int _cols, int _levels/*, bool r=false*/) : rows(_rows), cols(_cols), levels(_levels), d_data(_rows*_cols*_levels)/*,d_data_ptr(_levels)*/ {
 		thrust::fill(d_data.begin(), d_data.end(), 0.f);
 
+/*
 		if(!r) {
 				for(int i=0;i<levels;i++) {
 					d_data_ptr[i]=thrust::raw_pointer_cast(&d_data[IDX3C(0,0,i,rows,cols)]);
@@ -90,6 +97,7 @@ public:
 				d_data_ptr[i]=thrust::raw_pointer_cast(&d_data[IDX3C(0,0,0,rows,cols)]);
 			}
 		}
+*/
 	}
 
 	void reset() {
@@ -101,8 +109,10 @@ public:
 	virtual ~Cube() {
 		d_data.clear();
 		d_data.shrink_to_fit();
+/*
 		d_data_ptr.clear();
 		d_data_ptr.shrink_to_fit();
+*/
 	}
 
 	void copy(cube_ptr m) {
@@ -115,7 +125,7 @@ public:
 
 	void randomize() {
 		for(int i=0;i<numel();i++) {
-			d_data[i]=(((float)rand())/RAND_MAX)/100.;
+			d_data[i]=-0.9+(((float)rand())/RAND_MAX)/500.;
 		}
 	}
 
@@ -124,7 +134,7 @@ public:
 
 class MatrixBatched : public Cube {
 public:
-	MatrixBatched(int _rows, int _cols, int _batchSize, bool r=false) : Cube(_rows, _cols, _batchSize,r) {
+	MatrixBatched(int _rows, int _cols, int _batchSize/*, bool r=false*/) : Cube(_rows, _cols, _batchSize/*,r*/) {
 	}
 
 	void print(int l) {
@@ -500,7 +510,6 @@ inline void cublasMul(float alpha, float beta, matrixb_ptr m1, cublasOperation_t
 	p->rows=(transa==CUBLAS_OP_N?m1->rows:m1->cols);
 	p->cols=(transb==CUBLAS_OP_N?m2->cols:m2->rows);
 
-/*
 	for(int l=0; l < m1->levels; l++ ) {
 			cublasStatus_t status = cublasSgemm (handle, transa, transb, p->rows, p->cols, check1, &alpha,
 				 thrust::raw_pointer_cast (&m1->d_data[IDX3C(0,0,l,m1->rows,m1->cols)]), lda, 
@@ -510,7 +519,7 @@ inline void cublasMul(float alpha, float beta, matrixb_ptr m1, cublasOperation_t
 			  std::cerr << "!!!! kernel execution error.\n";
 			}
 	}
-*/
+/*
 			cublasStatus_t status = cublasSgemmBatched (handle, transa, transb, p->rows, p->cols, check1, &alpha,
 				 (const float**)thrust::raw_pointer_cast (m1->d_data_ptr.data()), lda, 
 				 (const float**)thrust::raw_pointer_cast (m2->d_data_ptr.data()), ldb, &beta,
@@ -518,6 +527,7 @@ inline void cublasMul(float alpha, float beta, matrixb_ptr m1, cublasOperation_t
 			if (status != CUBLAS_STATUS_SUCCESS) {
 			  std::cerr << "!!!! kernel execution error.\n";
 			}
+*/
 	//cuMulMatrixBatched<<<m1->levels,dim3(m1->rows,m2->cols)>>>(alpha,beta, transa, transb, m1->rows, m1->cols, m2->cols,m1->levels, thrust::raw_pointer_cast(m1->d_data.data()), thrust::raw_pointer_cast(m2->d_data.data()), thrust::raw_pointer_cast(p->d_data.data()));
 
 }
@@ -617,6 +627,9 @@ inline void cublasAddSub(float alpha, float beta, matrix_ptr m1, matrix_ptr m2, 
 	assert(m1->rows==m2->rows);
 //	printf("%d %d\n",m1->cols, m2->cols);
 	assert(m1->cols==m2->cols);
+	assert(m1->levels==1);
+	assert(m2->levels==1);
+	assert(p->levels==1);
 
 	int lda=m1->rows;
 	int ldb=m2->rows;
@@ -744,7 +757,7 @@ __global__ void cuSum(int rows, int cols, int levels, float *a) {
 void mySum(matrixb_ptr m) {
 
 //	cout << m->rows << " " << m->cols << " " << m->levels << endl;
-	cuSum<<<1,dim3( m->rows, m->cols)>>>(m->rows, m->cols, m->levels, thrust::raw_pointer_cast(m->d_data.data()));
+	cuSum<<<1,dim3( m->rows>32?32:m->rows, m->cols>32?32:m->cols)>>>(m->rows, m->cols, m->levels, thrust::raw_pointer_cast(m->d_data.data()));
 	check_cuda_errors(__FILE__, __LINE__);
 
 
@@ -771,8 +784,8 @@ public:
 
 	layer_ptr nextLayer;
 	layer_ptr prevLayer;
-	matrixb_ptr nextMatrix;
-	matrixb_ptr prevMatrix;
+	matrix_ptr nextMatrix;
+	matrix_ptr prevMatrix;
 	
 	vectorb_ptr output;
 	matrixb_ptr outputDerived;
@@ -784,18 +797,20 @@ public:
 	vectorb_ptr input;
 	matrixb_ptr weightAdj;
 	matrixb_ptr mTmp;
+	vectorb_ptr vTmp;
 
 
-	Layer(int _neuronNum, int _neuronType, int _batchSize, vector_ptr _bias=0) : neuronNum(_neuronNum), neuronType(_neuronType),  batchSize(_batchSize), nextLayer(0), prevLayer(0), weightAdj(0), mTmp(0) {
+	Layer(int _neuronNum, int _neuronType, int _batchSize, vector_ptr _bias=0) : neuronNum(_neuronNum), neuronType(_neuronType),  batchSize(_batchSize), nextLayer(0), prevLayer(0), weightAdj(0), mTmp(0), vTmp(0) {
 		cout << __PRETTY_FUNCTION__ << _neuronNum << endl;
 		activationNum=0;
 
 		output=new RowVectorBatched(neuronNum, batchSize);
 		input=new RowVectorBatched(neuronNum, batchSize);
 
-		if(_bias==0)
+		if(_bias==0) {
 			bias=new RowVector(neuronNum);
-		else
+			bias->randomize();
+		} else
 			bias=_bias;
 		outputDerived=new MatrixBatched(neuronNum, neuronNum, batchSize);
 			
@@ -816,8 +831,25 @@ public:
 	void excite() {
 		if(prevLayer!=0) {
 			cublasMul(prevLayer->output, prevMatrix, input);
-			cublasAdd(input, bias, input);
-			neuron_func[neuronType](input,output, outputDerived,nextLayer==0);
+			if(vTmp==0) {
+				vTmp= new RowVectorBatched(neuronNum, input->levels);
+			}
+			cublasAdd(input, bias, vTmp);
+			neuron_func[neuronType](vTmp,output, outputDerived,nextLayer==0);
+#ifdef DEBUG
+if(nextLayer!=0) {
+			cout << "bias" << endl;
+			bias->println(0);
+			cout << "prevMatrix" << endl;
+			prevMatrix->println(0);
+			cout << "prevLayer->output" << endl;
+			for(int i=0;i<batchSize;i++)
+				prevLayer->output->println(i);
+			cout << "input" << endl;
+			for(int i=0;i<batchSize;i++)
+				input->println(i);
+}
+#endif
 /*
 cout << "output////////////////////////" << endl;
 			outputDerived->println(1);
@@ -836,11 +868,16 @@ cout << "////////////////////////" << endl;
 
 			cublasMul(0.5,0.f,error_derived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, mse);
 			mySum(mse);
-/*
-cout << "*-------------------------" << endl;
-			error_derived->print(3);
-cout << "*-------------------------" << endl;
-*/
+#ifdef DEBUG
+cout <<"outputLayer->output" << endl;
+			for(int i=0;i<batchSize;i++)
+			output->println(i);
+	
+cout << "error_derived" << endl;
+			for(int i=0;i<batchSize;i++)
+			error_derived->println(i);
+#endif
+
 			cublasMul(outputDerived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, delta);
 //			mulElementwiseT(outputDerived, error_derived, delta);
 			
@@ -883,19 +920,23 @@ cout << "*-------------------------" << endl;
 
 			cublasMul(SPARSITY_WEIGHT, 1.f, outputDerived, CUBLAS_OP_N, sparsity, CUBLAS_OP_N, delta);
 			
-/*
+#ifdef DEBUG
 			cout << "output" << endl;
 			for(int k=0;k<batchSize;k++)
 				output->println(k);
+/*
 			cout << "outputDerived" << endl;
 			outputDerived->println(1);
+*/
 			cout << "nextMatrix" << endl;
 			nextMatrix->println(0);
+/*
 			cout << "sparsity" << endl;
 			sparsity->println(0);
+*/
 			cout << "delta" << endl;
 			delta->println(1);
-*/
+#endif
 		}
 		if(prevLayer!=0)
 			prevLayer->backpropagationSparse();
@@ -924,9 +965,9 @@ cout << "*-------------------------" << endl;
 			if(weightAdj==0)
 				weightAdj=new MatrixBatched(prevMatrix->cols, prevMatrix->rows, batchSize);
 			//printf("delta %d %d\n", delta->rows, delta->cols);
-			cublasMul(LEARNING_RATE, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
+			cublasMul(learningRate, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 //			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
-			cublasMul(-LEARNING_RATE, 1.f, delta, CUBLAS_OP_T, unit, CUBLAS_OP_N, bias);
+			cublasMul(-learningRate, 1.f, delta, CUBLAS_OP_T, unit, CUBLAS_OP_N, bias);
 		}
 		if(nextLayer!=0)
 			nextLayer->adjust();
@@ -976,7 +1017,7 @@ struct Autoencoder {
 		inputLayer->addTail(outputLayer);
 
 		for(layer_ptr i=inputLayer;i!=outputLayer;i=i->nextLayer) {
-			i->nextMatrix=new MatrixBatched(i->neuronNum, i->nextLayer->neuronNum, batchSize, true);
+			i->nextMatrix=new Matrix(i->neuronNum, i->nextLayer->neuronNum);
 			i->nextLayer->prevMatrix=i->nextMatrix;
 			i->nextMatrix->randomize();
 		}	
@@ -1043,7 +1084,7 @@ public:
 		}
 
 		autoencoder->addTail(aptr=new Autoencoder(layerNeuronNum[_hiddenLayerNum-1],_outputNum,batchSize));
-		outputLayer=new Layer(_outputNum, LINEAR,batchSize,aptr->hiddenLayer->bias);
+		outputLayer=new Layer(_outputNum, SIGMOID_0,batchSize,aptr->hiddenLayer->bias);
 		inputLayer->addTail(outputLayer);
 
 		autoencoder_ptr a=autoencoder;
@@ -1192,7 +1233,7 @@ int main(int argc, char **argv) {
 		cerr << "cublas init failed" << endl;
 	}
 
-	int d[]={16,16,16,16};
+	int d[]={15, 16, 17, 18};//, 16,16,16,16};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(samples,input_size,output_size,l,std::vector<int>(d, d+l));
 
@@ -1201,10 +1242,11 @@ int main(int argc, char **argv) {
 	vectorb_ptr in=new RowVectorBatched(input_size, 1);
 	vectorb_ptr out=new RowVectorBatched(output_size, 1);
 #if 1
+	learningRate=LEARNING_RATE_AUTOENCODER;
 	cout << "pretraining ..." << endl;
 	for(int r=0;r<l;r++) {
 			cout << "autoencoder " << r << endl;
-			for(int k=0;k<80000;k++) {
+			for(int k=0;k<5000;k++) {
 //				for(int i=0;i<samples;i++) {
 //					in->copy(io.input, IDX3C(0,0,i, 1, input_size));
 					nn.pretrain(io.input);
@@ -1218,6 +1260,7 @@ int main(int argc, char **argv) {
 #endif
 	cout << "training ..." << endl;
 #if 1
+	learningRate=LEARNING_RATE;
 	ofstream mseFile("./mse.dat");
 for(int k=0;k<800000;k++) {
 if(k%100==0)
