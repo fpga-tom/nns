@@ -34,14 +34,15 @@
 #define SIGMOID_0 0
 #define LINEAR 1
 
-#define LEARNING_RATE 0.2215
-#define LEARNING_RATE_AUTOENCODER 0.1595
+#define LEARNING_RATE 0.01
+#define LEARNING_RATE_AUTOENCODER 0.01//0.01//0.1195
 #define SPARSITY .05f
-#define SPARSITY_WEIGHT .11f
+#define SPARSITY_WEIGHT .01f
 
 
 
 //#define DEBUG
+//#define DEBUG1
 
 using namespace std;
 
@@ -64,6 +65,8 @@ typedef Vector* vector_ptr;
 typedef Autoencoder* autoencoder_ptr;
 
 float learningRate=LEARNING_RATE_AUTOENCODER;
+float gLastMse=1000;
+float gMse=10000;
 
 inline void check_cuda_errors(const char *filename, const int line_number)
 {
@@ -116,6 +119,7 @@ public:
 	}
 
 	void copy(cube_ptr m) {
+		assert(numel()==m->numel());
 		thrust::copy(m->d_data.begin(),m->d_data.end(), d_data.begin());
 	}
 
@@ -125,7 +129,7 @@ public:
 
 	void randomize() {
 		for(int i=0;i<numel();i++) {
-			d_data[i]=-0.9+(((float)rand())/RAND_MAX)/500.;
+			d_data[i]=(-0.5+(((float)rand())/RAND_MAX));
 		}
 	}
 
@@ -684,7 +688,7 @@ inline void cublasAddSub(float alpha, float beta, matrixb_ptr m1, matrix_ptr m2,
 	for(int l=0; l < m1->levels; l++ ) {
 		cublasStatus_t status=cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N, m1->rows, m2->cols, &alpha,
 			 thrust::raw_pointer_cast(&m1->d_data[IDX3C(0,0,l, m1->rows, m1->cols)]), lda, &beta,
-			 thrust::raw_pointer_cast(&m2->d_data[IDX3C(0,0,0, m2->rows, m2->cols)]), ldb, 
+			 thrust::raw_pointer_cast(m2->d_data.data()), ldb, 
 			 thrust::raw_pointer_cast(&p->d_data[IDX3C(0,0,l, p->rows,p->cols)]), p->rows);
 		if (status != CUBLAS_STATUS_SUCCESS) {
 			  std::cerr << "!!!! kernel execution error.\n";
@@ -798,9 +802,14 @@ public:
 	matrixb_ptr weightAdj;
 	matrixb_ptr mTmp;
 	vectorb_ptr vTmp;
+	vector_ptr biasTmp;
+	matrix_ptr prevMatrixTmp;
+
+	float lastMse;
 
 
-	Layer(int _neuronNum, int _neuronType, int _batchSize, vector_ptr _bias=0) : neuronNum(_neuronNum), neuronType(_neuronType),  batchSize(_batchSize), nextLayer(0), prevLayer(0), weightAdj(0), mTmp(0), vTmp(0) {
+	Layer(int _neuronNum, int _neuronType, int _batchSize, vector_ptr _bias=0) : neuronNum(_neuronNum), neuronType(_neuronType),  batchSize(_batchSize), nextLayer(0), prevLayer(0), weightAdj(0), mTmp(0),
+			 vTmp(0),lastMse(100000),biasTmp(0), prevMatrixTmp(0) {
 		cout << __PRETTY_FUNCTION__ << _neuronNum << endl;
 		activationNum=0;
 
@@ -836,10 +845,20 @@ public:
 			}
 			cublasAdd(input, bias, vTmp);
 			neuron_func[neuronType](vTmp,output, outputDerived,nextLayer==0);
-#ifdef DEBUG
-if(nextLayer!=0) {
+#ifdef DEBUG1
+if(nextLayer==0)
 			cout << "bias" << endl;
 			bias->println(0);
+if(nextLayer!=0) {
+			cout << "output" << endl;
+			for(int i=0;i<batchSize;i++)
+				output->println(i);
+			cout << "prevMatrix" << endl;
+			prevMatrix->println(0);
+}
+#endif
+#ifdef DEBUG
+if(nextLayer!=0) {
 			cout << "prevMatrix" << endl;
 			prevMatrix->println(0);
 			cout << "prevLayer->output" << endl;
@@ -868,7 +887,8 @@ cout << "////////////////////////" << endl;
 
 			cublasMul(0.5,0.f,error_derived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, mse);
 			mySum(mse);
-#ifdef DEBUG
+			gMse=mse->d_data[0];
+#ifdef DEBUG1
 cout <<"outputLayer->output" << endl;
 			for(int i=0;i<batchSize;i++)
 			output->println(i);
@@ -877,8 +897,16 @@ cout << "error_derived" << endl;
 			for(int i=0;i<batchSize;i++)
 			error_derived->println(i);
 #endif
+#ifdef DEBUG
+#endif
 
 			cublasMul(outputDerived, CUBLAS_OP_N, error_derived, CUBLAS_OP_T, delta);
+#ifdef DEBUG
+			for(int i=0;i<batchSize;i++) {
+				cout << "delta" << endl;
+				delta->println(i);
+			}
+#endif
 //			mulElementwiseT(outputDerived, error_derived, delta);
 			
 		}
@@ -890,6 +918,10 @@ cout << "error_derived" << endl;
 			MatrixBatched m(outputDerived->rows, nextMatrix->cols,batchSize);
 			cublasMul(outputDerived, CUBLAS_OP_N, nextMatrix, CUBLAS_OP_N, &m);
 			cublasMul(&m,nextLayer->delta, delta);
+#ifdef DEBUG1
+			cout << "nextMatrix" << endl;
+			nextMatrix->println(0);
+#endif
 		}
 		if(prevLayer!=0)
 			prevLayer->backpropagation();
@@ -928,8 +960,6 @@ cout << "error_derived" << endl;
 			cout << "outputDerived" << endl;
 			outputDerived->println(1);
 */
-			cout << "nextMatrix" << endl;
-			nextMatrix->println(0);
 /*
 			cout << "sparsity" << endl;
 			sparsity->println(0);
@@ -965,28 +995,86 @@ cout << "error_derived" << endl;
 			if(weightAdj==0)
 				weightAdj=new MatrixBatched(prevMatrix->cols, prevMatrix->rows, batchSize);
 			//printf("delta %d %d\n", delta->rows, delta->cols);
-			cublasMul(learningRate, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
+			cublasMul(1.0f, 0.0f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 //			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
-			cublasMul(-learningRate, 1.f, delta, CUBLAS_OP_T, unit, CUBLAS_OP_N, bias);
 		}
 		if(nextLayer!=0)
 			nextLayer->adjust();
 	}
 
-	void adjustAdd() {
+	void update() {
 		if(prevLayer!=0) {
 			mySum(weightAdj);
-			cublasMul(-1.f, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
+
+			if(prevMatrixTmp==0) 
+				prevMatrixTmp=new Matrix(prevMatrix->rows,prevMatrix->cols);
+			if(biasTmp==0)
+				biasTmp=new RowVector(bias->cols);
+
 /*
-			for(int k=0;k<batchSize;k++)
+					if(gLastMse < gMse / *- 0.001* /) {
+							if(nextLayer==0) {
+								learningRate*=.4;
+
+							if(learningRate==0)
+								learningRate=LEARNING_RATE_AUTOENCODER;
+/ *
+								if(learningRate<LEARNING_RATE_AUTOENCODER/batchSize) 
+									learningRate=LEARNING_RATE_AUTOENCODER;
+*/
+//							}
+/*
+							if(learningRate>0.001) {
+* /
+								prevMatrix->copy(prevMatrixTmp);
+								bias->copy(biasTmp);
+
+/ *
+							if(gLastMse==gMse) {
+								Matrix m1(prevMatrix->rows,prevMatrix->cols);
+								RowVector v1(bias->cols);
+								m1.randomize();
+								v1.randomize();
+
+								cublasAdd(prevMatrix, &m1, prevMatrix);
+								cublasAdd(bias,&v1,bias);
+							}
+* /
+							}
+					} else {
+
+
+						prevMatrixTmp->copy(prevMatrix);
+						biasTmp->copy(bias);
+
+						if(nextLayer==0)
+							learningRate*=1.1;
+
+*/
+						cublasMul(-learningRate/*batchSize*/, 1.f, weightAdj, CUBLAS_OP_T, unit, CUBLAS_OP_N, prevMatrix);
+						mySum(delta);
+						cublasMul(-learningRate/*batchSize*/, 1.f, delta, CUBLAS_OP_T, unit, CUBLAS_OP_N, bias);
+//					}
+
+#ifdef DEBUG1
+	if(nextLayer==0)
+			for(int k=0;k<batchSize;k++) {
+				cout << "weightAdj" << endl;
 				weightAdj->println(k);
+			}
+#endif
+/*
 */
 //			prevMatrix->println(0);
-			weightAdj->reset();
-//			cublasMul(0.f,0.f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
+//			weightAdj->reset();
+			cublasMul(0.f,0.f, delta, CUBLAS_OP_N, prevLayer->output, CUBLAS_OP_N, weightAdj);
 		}
-		if(nextLayer!=0)
-			nextLayer->adjustAdd();
+	if(prevLayer==0) {
+//						cout << "learningRate " << (learningRate/batchSize) << "lastMse " << gLastMse << "mse " << gMse << endl;
+		gLastMse=gMse;
+	}
+		if(prevLayer!=0)
+			prevLayer->update();
 	}
 
 	void addTail(layer_ptr layer) {
@@ -1039,12 +1127,10 @@ struct Autoencoder {
 	}
 	
 	void train(vectorb_ptr p) {
-		for(int i=0;i<1;i++) {
 				excite(p);
 				outputLayer->error(p)->backpropagationSparse();
 				inputLayer->adjust();
-		}
-//		inputLayer->adjustAdd();
+//		inputLayer->update();
 /*
 		if(next!=0) {
 			next->train(hiddenLayer->output);
@@ -1084,7 +1170,7 @@ public:
 		}
 
 		autoencoder->addTail(aptr=new Autoencoder(layerNeuronNum[_hiddenLayerNum-1],_outputNum,batchSize));
-		outputLayer=new Layer(_outputNum, SIGMOID_0,batchSize,aptr->hiddenLayer->bias);
+		outputLayer=new Layer(_outputNum, LINEAR,batchSize,aptr->hiddenLayer->bias);
 		inputLayer->addTail(outputLayer);
 
 		autoencoder_ptr a=autoencoder;
@@ -1120,7 +1206,7 @@ public:
 	void nextRound() {
 		autoencoder_pretrain->hiddenLayer->calculateSparseActivation();
 		autoencoder_pretrain->inputLayer->nextRound();
-		autoencoder_pretrain->inputLayer->adjustAdd();
+		autoencoder_pretrain->outputLayer->update();
 	}
 
 	void pretrainNext() {
@@ -1128,7 +1214,7 @@ public:
 	}
 
 	void pretrainAdjust() {
-		autoencoder_pretrain->inputLayer->adjustAdd();
+		autoencoder_pretrain->inputLayer->update();
 	}
 
 	
@@ -1166,7 +1252,7 @@ public:
 	}
 
 	void adjust() {
-		inputLayer->adjustAdd();
+		outputLayer->update();
 	}
 
 	virtual ~NeuralNet() {
@@ -1233,7 +1319,7 @@ int main(int argc, char **argv) {
 		cerr << "cublas init failed" << endl;
 	}
 
-	int d[]={15, 16, 17, 18};//, 16,16,16,16};
+	int d[]={32,32,32,32};//, 16,};// 17, 18};//, 16,16,16,16};
 	int l=sizeof(d)/sizeof(int);
 	NeuralNet nn(samples,input_size,output_size,l,std::vector<int>(d, d+l));
 
@@ -1245,8 +1331,17 @@ int main(int argc, char **argv) {
 	learningRate=LEARNING_RATE_AUTOENCODER;
 	cout << "pretraining ..." << endl;
 	for(int r=0;r<l;r++) {
+			gMse=10000;
+			learningRate=LEARNING_RATE_AUTOENCODER;
 			cout << "autoencoder " << r << endl;
-			for(int k=0;k<5000;k++) {
+//			for(int k=0;k<10000/*5000*/;k++) {
+			int k=0;
+			while(gMse>.1) {
+				if(k%100==0) {
+					printf("%0.15f ", gMse);
+					cout << gMse << " " << k << " " << learningRate << endl;
+				}
+				k++;
 //				for(int i=0;i<samples;i++) {
 //					in->copy(io.input, IDX3C(0,0,i, 1, input_size));
 					nn.pretrain(io.input);
@@ -1255,12 +1350,14 @@ int main(int argc, char **argv) {
 				//}
 //					nn.pretrainAdjust();
 			}
+			cout << gMse << " " << k << " " << learningRate << endl;
 			nn.pretrainNext();
 	}
 #endif
 	cout << "training ..." << endl;
 #if 1
 	learningRate=LEARNING_RATE;
+	gMse=10000;
 	ofstream mseFile("./mse.dat");
 for(int k=0;k<800000;k++) {
 if(k%100==0)
